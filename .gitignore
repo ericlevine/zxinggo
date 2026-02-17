@@ -1,0 +1,5 @@
+# Compiled binaries
+barcodescan
+*.exe
+*.test
+*.out
