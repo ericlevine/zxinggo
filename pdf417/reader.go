@@ -40,7 +40,8 @@ func (r *PDF417Reader) decode(image *zxinggo.BinaryBitmap, opts *zxinggo.DecodeO
 		return nil, err
 	}
 
-	detResult, err := detector.Detect(matrix, multiple)
+	tryHarder := opts != nil && opts.TryHarder
+	detResult, err := detector.Detect(matrix, multiple, tryHarder)
 	if err != nil {
 		return nil, err
 	}
