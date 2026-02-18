@@ -293,6 +293,74 @@ func TestWriterFormatValidation(t *testing.T) {
 	}
 }
 
+// --- ITF ---
+
+func TestITFRoundTrip(t *testing.T) {
+	tests := []string{
+		"123456",
+		"00123456789012",
+		"1234567890",
+		"30712345000010",
+	}
+	writer := NewITFWriter()
+	reader := NewITFReader()
+	for _, tc := range tests {
+		t.Run(tc, func(t *testing.T) {
+			roundTrip1D(t, tc, zxinggo.FormatITF, writer.encode, reader)
+		})
+	}
+}
+
+func TestITFOddLengthRejected(t *testing.T) {
+	_, err := NewITFWriter().Encode("12345", zxinggo.FormatITF, 200, 50, nil)
+	if err == nil {
+		t.Error("expected error for odd-length ITF input")
+	}
+}
+
+// --- Codabar ---
+
+func TestCodabarRoundTrip(t *testing.T) {
+	tests := []string{
+		"123456",
+		"1234-5678",
+		"29.95",
+		"100.00",
+	}
+	writer := NewCodabarWriter()
+	reader := NewCodabarReader()
+	for _, tc := range tests {
+		t.Run(tc, func(t *testing.T) {
+			code, err := writer.encode(tc)
+			if err != nil {
+				t.Fatalf("encode error: %v", err)
+			}
+
+			quiet := 10
+			padded := make([]bool, len(code)+2*quiet)
+			copy(padded[quiet:], code)
+
+			row := bitutil.NewBitArray(len(padded))
+			for i, b := range padded {
+				if b {
+					row.Set(i)
+				}
+			}
+
+			result, err := reader.DecodeRow(0, row, nil)
+			if err != nil {
+				t.Fatalf("decode error for %q: %v", tc, err)
+			}
+			if result.Text != tc {
+				t.Errorf("round-trip mismatch: got %q, want %q", result.Text, tc)
+			}
+			if result.Format != zxinggo.FormatCodabar {
+				t.Errorf("format mismatch: got %v, want %v", result.Format, zxinggo.FormatCodabar)
+			}
+		})
+	}
+}
+
 // --- MultiFormatOneDReader ---
 
 func TestMultiFormatOneDReaderCode39(t *testing.T) {

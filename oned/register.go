@@ -13,6 +13,8 @@ func init() {
 	zxinggo.RegisterReader(zxinggo.FormatEAN8, oneDReaderFactory)
 	zxinggo.RegisterReader(zxinggo.FormatUPCA, oneDReaderFactory)
 	zxinggo.RegisterReader(zxinggo.FormatUPCE, oneDReaderFactory)
+	zxinggo.RegisterReader(zxinggo.FormatITF, oneDReaderFactory)
+	zxinggo.RegisterReader(zxinggo.FormatCodabar, oneDReaderFactory)
 
 	// Register writers
 	zxinggo.RegisterWriter(zxinggo.FormatCode128, func() zxinggo.Writer { return NewCode128Writer() })
@@ -21,4 +23,6 @@ func init() {
 	zxinggo.RegisterWriter(zxinggo.FormatEAN8, func() zxinggo.Writer { return NewEAN8Writer() })
 	zxinggo.RegisterWriter(zxinggo.FormatUPCA, func() zxinggo.Writer { return NewUPCAWriter() })
 	zxinggo.RegisterWriter(zxinggo.FormatUPCE, func() zxinggo.Writer { return NewUPCEWriter() })
+	zxinggo.RegisterWriter(zxinggo.FormatITF, func() zxinggo.Writer { return NewITFWriter() })
+	zxinggo.RegisterWriter(zxinggo.FormatCodabar, func() zxinggo.Writer { return NewCodabarWriter() })
 }

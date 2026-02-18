@@ -20,6 +20,8 @@ const (
 	FormatEAN8
 	FormatUPCA
 	FormatUPCE
+	FormatITF
+	FormatCodabar
 )
 
 // String returns the name of the barcode format.
@@ -41,6 +43,10 @@ func (f Format) String() string {
 		return "UPC_A"
 	case FormatUPCE:
 		return "UPC_E"
+	case FormatITF:
+		return "ITF"
+	case FormatCodabar:
+		return "CODABAR"
 	default:
 		return "UNKNOWN"
 	}

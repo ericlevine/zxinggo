@@ -67,6 +67,8 @@ var allFormats = []zxinggo.Format{
 	zxinggo.FormatEAN8,
 	zxinggo.FormatUPCA,
 	zxinggo.FormatUPCE,
+	zxinggo.FormatITF,
+	zxinggo.FormatCodabar,
 }
 
 func scanFile(path string, tryHarder, pure bool) ([]*zxinggo.Result, error) {

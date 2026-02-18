@@ -31,6 +31,12 @@ func NewMultiFormatOneDReader(opts *zxinggo.DecodeOptions) *MultiFormatOneDReade
 		if formats[zxinggo.FormatCode128] {
 			readers = append(readers, NewCode128Reader())
 		}
+		if formats[zxinggo.FormatITF] {
+			readers = append(readers, NewITFReader())
+		}
+		if formats[zxinggo.FormatCodabar] {
+			readers = append(readers, NewCodabarReader())
+		}
 	}
 
 	if len(readers) == 0 {
@@ -41,6 +47,8 @@ func NewMultiFormatOneDReader(opts *zxinggo.DecodeOptions) *MultiFormatOneDReade
 			NewUPCEReader(),
 			NewCode39Reader(),
 			NewCode128Reader(),
+			NewITFReader(),
+			NewCodabarReader(),
 		}
 	}
 
