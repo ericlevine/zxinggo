@@ -77,6 +77,7 @@ var allFormats = []zxinggo.Format{
 	zxinggo.FormatRSS14,
 	zxinggo.FormatRSSExpanded,
 	zxinggo.FormatMaxiCode,
+	zxinggo.FormatCode93,
 }
 
 func scanFile(path string, tryHarder, pure bool) ([]*zxinggo.Result, error) {

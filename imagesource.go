@@ -131,6 +131,21 @@ func (s *ImageLuminanceSource) RotateCounterClockwise() *ImageLuminanceSource {
 	}
 }
 
+// Crop returns a new ImageLuminanceSource that represents a rectangular
+// sub-region of this source.
+func (s *ImageLuminanceSource) Crop(left, top, cropWidth, cropHeight int) *ImageLuminanceSource {
+	newLum := make([]byte, cropWidth*cropHeight)
+	for y := 0; y < cropHeight; y++ {
+		srcOff := (top+y)*s.width + left
+		copy(newLum[y*cropWidth:], s.luminances[srcOff:srcOff+cropWidth])
+	}
+	return &ImageLuminanceSource{
+		luminances: newLum,
+		width:      cropWidth,
+		height:     cropHeight,
+	}
+}
+
 // BitMatrixToImage converts a BitMatrix to a grayscale image where black
 // modules are black (0) and white modules are white (255).
 func BitMatrixToImage(matrix interface{ Width() int; Height() int; Get(x, y int) bool }) *image.Gray {

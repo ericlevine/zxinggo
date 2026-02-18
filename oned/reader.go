@@ -37,7 +37,10 @@ func NewMultiFormatOneDReader(opts *zxinggo.DecodeOptions) *MultiFormatOneDReade
 		}
 		if possibleFormats[zxinggo.FormatCode39] {
 			useCheckDigit := opts.AssumeCode39CheckDigit
-			readers = append(readers, NewCode39ReaderWithCheckDigit(useCheckDigit, false))
+			readers = append(readers, NewCode39ReaderWithCheckDigit(useCheckDigit, true))
+		}
+		if possibleFormats[zxinggo.FormatCode93] {
+			readers = append(readers, NewCode93Reader())
 		}
 		if possibleFormats[zxinggo.FormatCode128] {
 			readers = append(readers, NewCode128Reader())
@@ -62,7 +65,8 @@ func NewMultiFormatOneDReader(opts *zxinggo.DecodeOptions) *MultiFormatOneDReade
 			NewEAN13Reader(),
 			NewEAN8Reader(),
 			NewUPCEReader(),
-			NewCode39Reader(),
+			NewCode39ReaderWithCheckDigit(false, true),
+			NewCode93Reader(),
 			NewCode128Reader(),
 			NewITFReader(),
 			NewCodabarReader(),

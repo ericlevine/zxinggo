@@ -26,6 +26,19 @@ func (r *MultiFormatReader) Decode(image *BinaryBitmap, opts *DecodeOptions) (*R
 			return result, nil
 		}
 	}
+	if opts != nil && opts.AlsoInverted {
+		// Try again with inverted image — flip the cached black matrix in-place
+		matrix, err := image.BlackMatrix()
+		if err == nil {
+			matrix.FlipAll()
+			for _, reader := range r.readers {
+				result, err := reader.Decode(image, opts)
+				if err == nil {
+					return result, nil
+				}
+			}
+		}
+	}
 	return nil, ErrNotFound
 }
 

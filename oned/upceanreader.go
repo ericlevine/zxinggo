@@ -115,6 +115,35 @@ func DecodeUPCEAN(rowNumber int, row *bitutil.BitArray, decoder UPCEANMiddleDeco
 		symbologyID = "4"
 	}
 	res.PutMetadata(zxinggo.MetadataSymbologyIdentifier, "]E"+symbologyID)
+
+	// Attempt to decode UPC/EAN extension (2 or 5 digit supplemental)
+	extResult, extErr := decodeUPCEANExtension(rowNumber, row, endRange[1])
+	if extErr == nil {
+		res.PutMetadata(zxinggo.MetadataUPCEANExtension, extResult.Text)
+		res.AddResultPoints(extResult.Points)
+		for k, v := range extResult.Metadata {
+			res.PutMetadata(k, v)
+		}
+	}
+
+	// If AllowedEANExtensions is set, reject if extension length doesn't match
+	if opts != nil && len(opts.AllowedEANExtensions) > 0 {
+		extLen := 0
+		if extErr == nil {
+			extLen = len(extResult.Text)
+		}
+		found := false
+		for _, allowed := range opts.AllowedEANExtensions {
+			if extLen == allowed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, zxinggo.ErrNotFound
+		}
+	}
+
 	return res, nil
 }
 

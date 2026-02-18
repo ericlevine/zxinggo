@@ -27,6 +27,7 @@ const (
 	FormatRSS14
 	FormatRSSExpanded
 	FormatMaxiCode
+	FormatCode93
 )
 
 // String returns the name of the barcode format.
@@ -62,6 +63,8 @@ func (f Format) String() string {
 		return "RSS_EXPANDED"
 	case FormatMaxiCode:
 		return "MAXICODE"
+	case FormatCode93:
+		return "CODE_93"
 	default:
 		return "UNKNOWN"
 	}
@@ -208,6 +211,18 @@ func (b *BinaryBitmap) BlackMatrix() (*bitutil.BitMatrix, error) {
 	}
 	b.matrix = m
 	return m, nil
+}
+
+// Crop returns a new BinaryBitmap representing a rectangular sub-region.
+// Returns nil if the source doesn't support cropping.
+func (b *BinaryBitmap) Crop(left, top, width, height int) *BinaryBitmap {
+	source := b.binarizer.LuminanceSource()
+	imgSource, ok := source.(*ImageLuminanceSource)
+	if !ok {
+		return nil
+	}
+	cropped := imgSource.Crop(left, top, width, height)
+	return NewBinaryBitmap(NewBinarizerFromSource(b.binarizer, cropped))
 }
 
 // RotateCounterClockwise returns a new BinaryBitmap rotated 90 degrees CCW.
