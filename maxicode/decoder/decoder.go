@@ -259,11 +259,11 @@ func decodeBitStream(bytes []byte, mode int) (string, error) {
 		service := fmt.Sprintf("%03d", getInt(bytes, serviceClassBytes))
 		msg := getMessage(bytes, 10, 84)
 		prefix := string(rsChar) + "01" + string(gsChar)
-		if strings.HasPrefix(msg, "[)>"+prefix) {
-			// Insert after the [)>\x1E01\x1D header
-			result.WriteString("[)>" + prefix)
+		if strings.HasPrefix(msg, "[)>"+prefix) && len(msg) >= 9 {
+			// Insert structured data at position 9 (after [)>RS01GS + 2-char format type)
+			result.WriteString(msg[:9])
 			result.WriteString(postcode + string(gsChar) + country + string(gsChar) + service + string(gsChar))
-			result.WriteString(msg[len("[)>"+prefix):])
+			result.WriteString(msg[9:])
 		} else {
 			result.WriteString(postcode + string(gsChar) + country + string(gsChar) + service + string(gsChar))
 			result.WriteString(msg)
@@ -361,10 +361,11 @@ func getMessage(bytes []byte, start, length int) string {
 		default:
 			sb.WriteRune(c)
 		}
-		shift--
+		// Java uses post-decrement: if (shift-- == 0) — checks BEFORE decrementing.
 		if shift == 0 {
 			set = lastset
 		}
+		shift--
 	}
 	// Strip trailing PAD characters.
 	result := sb.String()
