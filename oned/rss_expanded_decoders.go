@@ -116,7 +116,9 @@ func (gd *generalAppIdDecoder) decodeGeneralPurposeField(pos int, remaining *str
 		gd.buf.WriteString(*remaining)
 	}
 	gd.position = pos
-	gd.encoding = parsingStateNumeric
+	// Note: encoding state is intentionally NOT reset here.
+	// It persists across calls, matching Java's CurrentParsingState behavior
+	// where only setPosition() is called, not setNumeric().
 
 	info, err := gd.parseBlocks()
 	if err != nil {

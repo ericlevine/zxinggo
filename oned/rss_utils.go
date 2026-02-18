@@ -140,9 +140,8 @@ func getRSSvalue(widths []int, maxWidth int, noNarrow bool) int {
 	elements := len(widths)
 	for bar := 0; bar < elements-1; bar++ {
 		elmWidth := 1
-		narrowMask |= 1 << uint(bar)
+		narrowMask |= 1 << uint(bar) // init: assume narrow
 		for elmWidth < widths[bar] {
-			narrowMask &^= 1 << uint(bar)
 			subVal := combins(n-elmWidth-1, elements-bar-2)
 			if noNarrow && narrowMask == 0 &&
 				n-elmWidth-(elements-bar-1) >= elements-bar-1 {
@@ -159,7 +158,7 @@ func getRSSvalue(widths []int, maxWidth int, noNarrow bool) int {
 			}
 			val += subVal
 			elmWidth++
-			narrowMask |= 1 << uint(bar)
+			narrowMask &^= 1 << uint(bar) // increment: no longer narrow
 		}
 		n -= elmWidth
 	}

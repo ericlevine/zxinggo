@@ -11,13 +11,25 @@ import (
 // bars and the second in the spaces. ITF-14 is ITF with a fixed length of 14.
 
 const (
-	itfMaxAvgVariance        = 0.38
-	itfMaxIndividualVariance = 0.5
+	itfMaxAvgVariance           = 0.38
+	itfMaxIndividualVariance2x  = 0.5  // 2x wide lines
+	itfMaxIndividualVariance3x  = 0.75 // 3x wide lines
 )
 
-// Patterns of narrow/wide for digits 0-9.
-var itfPatterns = [10][5]int{
-	{1, 1, 3, 3, 1}, // 0
+// Patterns of narrow/wide for digits 0-9, duplicated for 2x and 3x wide.
+// Indices 0-9 use 2x (w=2), indices 10-19 use 3x (W=3).
+var itfPatterns = [20][5]int{
+	{1, 1, 2, 2, 1}, // 0 (2x)
+	{2, 1, 1, 1, 2}, // 1
+	{1, 2, 1, 1, 2}, // 2
+	{2, 2, 1, 1, 1}, // 3
+	{1, 1, 2, 1, 2}, // 4
+	{2, 1, 2, 1, 1}, // 5
+	{1, 2, 2, 1, 1}, // 6
+	{1, 1, 1, 2, 2}, // 7
+	{2, 1, 1, 2, 1}, // 8
+	{1, 2, 1, 2, 1}, // 9
+	{1, 1, 3, 3, 1}, // 0 (3x)
 	{3, 1, 1, 1, 3}, // 1
 	{1, 3, 1, 1, 3}, // 2
 	{3, 3, 1, 1, 1}, // 3
@@ -31,7 +43,10 @@ var itfPatterns = [10][5]int{
 
 // Start/end patterns: narrow bar, narrow space, narrow bar, narrow space
 var itfStartPattern = []int{1, 1, 1, 1}
-var itfEndPatternReversed = []int{1, 1, 3} // end pattern scanned right-to-left
+var itfEndPatternReversed = [2][]int{
+	{1, 1, 2}, // 2x
+	{1, 1, 3}, // 3x
+}
 
 // ITFReader decodes ITF (Interleaved 2 of 5) barcodes.
 type ITFReader struct {
@@ -177,23 +192,17 @@ func (r *ITFReader) decodeEnd(row *bitutil.BitArray) ([2]int, error) {
 		return [2]int{}, err
 	}
 
-	endRange, err := findITFGuardPattern(row, endStart, itfEndPatternReversed)
+	// Try 2x end pattern first, fall back to 3x
+	endRange, err := findITFGuardPattern(row, endStart, itfEndPatternReversed[0])
 	if err != nil {
-		return [2]int{}, err
+		endRange, err = findITFGuardPattern(row, endStart, itfEndPatternReversed[1])
+		if err != nil {
+			return [2]int{}, err
+		}
 	}
 
-	// The start & end patterns must be pre/post fixed by a quiet zone. This
-	// zone should be at least 10 times the width of a narrow line.
-	quietZoneSize := r.narrowLineWidth * 10
-	if quietZoneSize < 1 {
-		quietZoneSize = 1
-	}
-	quietStart := endRange[0] - quietZoneSize
-	if quietStart < 0 {
-		quietStart = 0
-	}
-	if !row.IsRange(quietStart, endRange[0], false) {
-		return [2]int{}, zxinggo.ErrNotFound
+	if err := r.validateQuietZone(row, endRange[0]); err != nil {
+		return [2]int{}, err
 	}
 
 	// Now un-reverse the coordinates
@@ -226,7 +235,7 @@ func findITFGuardPattern(row *bitutil.BitArray, rowOffset int, pattern []int) ([
 			counters[counterPosition]++
 		} else {
 			if counterPosition == patternLength-1 {
-				if PatternMatchVariance(counters, pattern, itfMaxIndividualVariance) < itfMaxAvgVariance {
+				if PatternMatchVariance(counters, pattern, itfMaxIndividualVariance2x) < itfMaxAvgVariance {
 					return [2]int{patternStart, x}, nil
 				}
 				patternStart += counters[0] + counters[1]
@@ -245,18 +254,24 @@ func findITFGuardPattern(row *bitutil.BitArray, rowOffset int, pattern []int) ([
 }
 
 func decodeITFDigit(counters []int) (int, error) {
-	bestVariance := itfMaxAvgVariance
+	bestVariance := float64(itfMaxAvgVariance)
 	bestMatch := -1
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		pattern := itfPatterns[i]
-		variance := PatternMatchVariance(counters, pattern[:], itfMaxIndividualVariance)
+		maxVariance := float64(itfMaxIndividualVariance2x)
+		if i > 9 {
+			maxVariance = itfMaxIndividualVariance3x
+		}
+		variance := PatternMatchVariance(counters, pattern[:], maxVariance)
 		if variance < bestVariance {
 			bestVariance = variance
 			bestMatch = i
+		} else if variance == bestVariance {
+			bestMatch = -1 // ambiguous match
 		}
 	}
 	if bestMatch >= 0 {
-		return bestMatch, nil
+		return bestMatch % 10, nil
 	}
 	return -1, zxinggo.ErrNotFound
 }

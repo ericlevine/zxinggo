@@ -221,19 +221,17 @@ func (r *Code128Reader) DecodeRow(rowNumber int, row *bitutil.BitArray, opts *zx
 		switch codeSet {
 		case code128CodeA:
 			if code < 64 {
-				ch := byte(' ' + code)
 				if shiftUpperMode == upperMode {
-					result.WriteByte(ch)
+					result.WriteByte(byte(' ' + code))
 				} else {
-					result.WriteByte(ch + 128)
+					result.WriteRune(rune(' ' + code + 128))
 				}
 				shiftUpperMode = false
 			} else if code < 96 {
-				ch := byte(code - 64)
 				if shiftUpperMode == upperMode {
-					result.WriteByte(ch)
+					result.WriteByte(byte(code - 64))
 				} else {
-					result.WriteByte(ch + 128)
+					result.WriteRune(rune(code + 64))
 				}
 				shiftUpperMode = false
 			} else {
@@ -281,11 +279,10 @@ func (r *Code128Reader) DecodeRow(rowNumber int, row *bitutil.BitArray, opts *zx
 			}
 		case code128CodeB:
 			if code < 96 {
-				ch := byte(' ' + code)
 				if shiftUpperMode == upperMode {
-					result.WriteByte(ch)
+					result.WriteByte(byte(' ' + code))
 				} else {
-					result.WriteByte(ch + 128)
+					result.WriteRune(rune(' ' + code + 128))
 				}
 				shiftUpperMode = false
 			} else {

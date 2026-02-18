@@ -136,6 +136,7 @@ func RecordPatternInReverse(row *bitutil.BitArray, start int, counters []int) er
 // PatternMatchVariance determines how closely observed counter widths match
 // a target pattern. Returns the ratio of total variance to pattern size.
 // Returns +Inf if any individual counter exceeds maxIndividualVariance.
+// Uses float32 arithmetic to match Java's float precision exactly.
 func PatternMatchVariance(counters []int, pattern []int, maxIndividualVariance float64) float64 {
 	numCounters := len(counters)
 	total := 0
@@ -148,21 +149,22 @@ func PatternMatchVariance(counters []int, pattern []int, maxIndividualVariance f
 		return math.Inf(1)
 	}
 
-	unitBarWidth := float64(total) / float64(patternLength)
-	maxIndividualVariance *= unitBarWidth
+	// Use float32 to match Java's float precision
+	unitBarWidth := float32(total) / float32(patternLength)
+	maxIndVar := float32(maxIndividualVariance) * unitBarWidth
 
-	totalVariance := 0.0
+	var totalVariance float32
 	for i := 0; i < numCounters; i++ {
-		counter := float64(counters[i])
-		scaledPattern := float64(pattern[i]) * unitBarWidth
+		counter := float32(counters[i])
+		scaledPattern := float32(pattern[i]) * unitBarWidth
 		variance := counter - scaledPattern
 		if variance < 0 {
 			variance = -variance
 		}
-		if variance > maxIndividualVariance {
+		if variance > maxIndVar {
 			return math.Inf(1)
 		}
 		totalVariance += variance
 	}
-	return totalVariance / float64(total)
+	return float64(totalVariance / float32(total))
 }

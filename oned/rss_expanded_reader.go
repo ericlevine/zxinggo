@@ -435,9 +435,6 @@ func (r *RSSExpandedReader) findNextPair(row *bitutil.BitArray, previousPairs []
 				if rssIsFinderPattern(counters) {
 					r.startEnd[0] = patternStart
 					r.startEnd[1] = x
-					if searchingEvenPair {
-						reverseInts(counters)
-					}
 					return nil
 				}
 				if searchingEvenPair {

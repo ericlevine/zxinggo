@@ -91,11 +91,14 @@ func DecodeUPCEAN(rowNumber int, row *bitutil.BitArray, decoder UPCEANMiddleDeco
 		return nil, zxinggo.ErrFormat
 	}
 
-	if !CheckStandardUPCEANChecksum(resultString) {
+	format := decoder.BarcodeFormat()
+	checksumStr := resultString
+	if format == zxinggo.FormatUPCE {
+		checksumStr = ConvertUPCEtoUPCA(resultString)
+	}
+	if !CheckStandardUPCEANChecksum(checksumStr) {
 		return nil, zxinggo.ErrChecksum
 	}
-
-	format := decoder.BarcodeFormat()
 	left := float64(startRange[1]+startRange[0]) / 2.0
 	right := float64(endRange[1]+endRange[0]) / 2.0
 	res := zxinggo.NewResult(
