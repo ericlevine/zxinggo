@@ -38,7 +38,7 @@ var rotations = [4]int{0, 180, 270, 90}
 func Detect(matrix *bitutil.BitMatrix, multiple bool, tryHarder bool) (*PDF417DetectorResult, error) {
 	for _, rotation := range rotations {
 		bitMatrix := applyRotation(matrix, rotation)
-		barcodeCoordinates := detect(multiple, bitMatrix, tryHarder)
+		barcodeCoordinates := detect(multiple, bitMatrix)
 		if len(barcodeCoordinates) > 0 {
 			return &PDF417DetectorResult{
 				Bits:     bitMatrix,
@@ -66,23 +66,19 @@ func applyRotation(matrix *bitutil.BitMatrix, rotation int) *bitutil.BitMatrix {
 }
 
 // detect detects PDF417 codes in an image. Only checks 0 degree rotation.
-func detect(multiple bool, bitMatrix *bitutil.BitMatrix, tryHarder bool) [][]*zxinggo.ResultPoint {
+func detect(multiple bool, bitMatrix *bitutil.BitMatrix) [][]*zxinggo.ResultPoint {
 	var barcodeCoordinates [][]*zxinggo.ResultPoint
 	row := 0
 	column := 0
 	foundBarcodeInRow := false
 
 	for row < bitMatrix.Height() {
-		vertices := findVertices(bitMatrix, row, column, tryHarder)
+		vertices := findVertices(bitMatrix, row, column)
 
 		if vertices[0] == nil && vertices[3] == nil {
 			if !foundBarcodeInRow {
-				if !tryHarder {
-					// we didn't find any barcode so that's the end of searching
-					break
-				}
-				row += rowStep
-				continue
+				// we didn't find any barcode so that's the end of searching
+				break
 			}
 			// we didn't find a barcode starting at the given column and row.
 			// Try again from the first column and slightly below the lowest
@@ -102,7 +98,7 @@ func detect(multiple bool, bitMatrix *bitutil.BitMatrix, tryHarder bool) [][]*zx
 		}
 		foundBarcodeInRow = true
 		barcodeCoordinates = append(barcodeCoordinates, vertices)
-		if !multiple && !tryHarder {
+		if !multiple {
 			break
 		}
 		// if we didn't find a right row indicator column, then continue the
@@ -133,7 +129,7 @@ func detect(multiple bool, bitMatrix *bitutil.BitMatrix, tryHarder bool) [][]*zx
 //	[5] x, y bottom left codeword area
 //	[6] x, y top right codeword area
 //	[7] x, y bottom right codeword area
-func findVertices(matrix *bitutil.BitMatrix, startRow, startColumn int, tryHarder bool) []*zxinggo.ResultPoint {
+func findVertices(matrix *bitutil.BitMatrix, startRow, startColumn int) []*zxinggo.ResultPoint {
 	height := matrix.Height()
 	width := matrix.Width()
 
@@ -141,7 +137,7 @@ func findVertices(matrix *bitutil.BitMatrix, startRow, startColumn int, tryHarde
 	minHeight := barcodeMinHeight
 
 	copyToResult(result,
-		findRowsWithPattern(matrix, height, width, startRow, startColumn, minHeight, startPattern[:], tryHarder),
+		findRowsWithPattern(matrix, height, width, startRow, startColumn, minHeight, startPattern[:]),
 		indexesStartPattern[:])
 
 	if result[4] != nil {
@@ -155,7 +151,7 @@ func findVertices(matrix *bitutil.BitMatrix, startRow, startColumn int, tryHarde
 	}
 
 	copyToResult(result,
-		findRowsWithPattern(matrix, height, width, startRow, startColumn, minHeight, stopPattern[:], tryHarder),
+		findRowsWithPattern(matrix, height, width, startRow, startColumn, minHeight, stopPattern[:]),
 		indexesStopPattern[:])
 
 	return result
@@ -173,7 +169,7 @@ func copyToResult(result, tmpResult []*zxinggo.ResultPoint, destinationIndexes [
 // occurs, returning a 4-element slice of result points.
 func findRowsWithPattern(matrix *bitutil.BitMatrix,
 	height, width, startRow, startColumn, minHeight int,
-	pattern []int, tryHarder bool) []*zxinggo.ResultPoint {
+	pattern []int) []*zxinggo.ResultPoint {
 
 	result := make([]*zxinggo.ResultPoint, 4)
 	found := false
@@ -183,12 +179,11 @@ func findRowsWithPattern(matrix *bitutil.BitMatrix,
 		loc := findGuardPattern(matrix, startColumn, startRow, width, pattern, counters)
 		if loc != nil {
 			for startRow > 0 {
-				startRow--
-				previousRowLoc := findGuardPattern(matrix, startColumn, startRow, width, pattern, counters)
+				previousRowLoc := findGuardPattern(matrix, startColumn, startRow-1, width, pattern, counters)
 				if previousRowLoc != nil {
+					startRow--
 					loc = previousRowLoc
 				} else {
-					startRow++
 					break
 				}
 			}
@@ -220,8 +215,9 @@ func findRowsWithPattern(matrix *bitutil.BitMatrix,
 			} else {
 				if skippedRowCount > skippedRowCountMax {
 					break
+				} else {
+					skippedRowCount++
 				}
-				skippedRowCount++
 			}
 		}
 		stopRow -= skippedRowCount + 1
@@ -230,14 +226,6 @@ func findRowsWithPattern(matrix *bitutil.BitMatrix,
 	}
 
 	if stopRow-startRow < minHeight {
-		if tryHarder && found {
-			// The match was too short — likely a false positive from noise.
-			// Resume searching from beyond the rejected match.
-			for i := range result {
-				result[i] = nil
-			}
-			return findRowsWithPattern(matrix, height, width, stopRow+1+rowStep, startColumn, minHeight, pattern, tryHarder)
-		}
 		for i := range result {
 			result[i] = nil
 		}

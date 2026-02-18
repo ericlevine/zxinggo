@@ -91,9 +91,12 @@ func (r *PDF417Reader) decode(image *zxinggo.BinaryBitmap, opts *zxinggo.DecodeO
 // Reset resets internal state.
 func (r *PDF417Reader) Reset() {}
 
+const modulesInStopPattern = 18
+const modulesInCodeword = 17
+
 func getMinWidth(p1, p2 *zxinggo.ResultPoint) int {
 	if p1 == nil || p2 == nil {
-		return 0
+		return math.MaxInt32
 	}
 	return int(math.Abs(p1.X - p2.X))
 }
@@ -102,23 +105,19 @@ func getMaxWidth(p1, p2 *zxinggo.ResultPoint) int {
 	if p1 == nil || p2 == nil {
 		return 0
 	}
-	return int(math.Abs(p1.X-p2.X)) | 1 // ensure odd
+	return int(math.Abs(p1.X - p2.X))
 }
 
 func getMinCodewordWidth(points []*zxinggo.ResultPoint) int {
 	return min(
-		getMinWidth(points[0], points[4]),
-		getMinWidth(points[6], points[2]),
-		getMinWidth(points[1], points[5]),
-		getMinWidth(points[7], points[3]),
+		min(getMinWidth(points[0], points[4]), getMinWidth(points[6], points[2])*modulesInCodeword/modulesInStopPattern),
+		min(getMinWidth(points[1], points[5]), getMinWidth(points[7], points[3])*modulesInCodeword/modulesInStopPattern),
 	)
 }
 
 func getMaxCodewordWidth(points []*zxinggo.ResultPoint) int {
 	return max(
-		getMaxWidth(points[0], points[4]),
-		getMaxWidth(points[6], points[2]),
-		getMaxWidth(points[1], points[5]),
-		getMaxWidth(points[7], points[3]),
+		max(getMaxWidth(points[0], points[4]), getMaxWidth(points[6], points[2])*modulesInCodeword/modulesInStopPattern),
+		max(getMaxWidth(points[1], points[5]), getMaxWidth(points[7], points[3])*modulesInCodeword/modulesInStopPattern),
 	)
 }

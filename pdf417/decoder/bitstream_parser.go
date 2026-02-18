@@ -7,8 +7,93 @@ import (
 	"strings"
 
 	zxinggo "github.com/ericlevine/zxinggo"
+	"github.com/ericlevine/zxinggo/charset"
 	"github.com/ericlevine/zxinggo/internal"
 )
+
+// eciResult mimics Java's ECIStringBuilder: it accumulates raw byte values
+// and decodes them using the current charset (defaulting to ISO-8859-1) when
+// an ECI boundary is encountered or the final string is requested.
+type eciResult struct {
+	currentBytes []byte
+	result       *strings.Builder
+	currentECI   *charset.ECI // nil means ISO-8859-1 (default)
+}
+
+func newECIResult(capacity int) *eciResult {
+	r := &eciResult{}
+	r.result = &strings.Builder{}
+	r.result.Grow(capacity)
+	return r
+}
+
+// WriteByte appends a single byte value (like Java's append(char) or append(byte)).
+func (e *eciResult) WriteByte(b byte) {
+	e.currentBytes = append(e.currentBytes, b)
+}
+
+// WriteString appends a string directly (used for numeric compaction output
+// and text compaction output which are always ASCII).
+func (e *eciResult) WriteString(s string) {
+	e.encodeCurrentBytesIfAny()
+	e.result.WriteString(s)
+}
+
+// appendECI flushes accumulated bytes under the current charset, then
+// switches to the charset identified by the given ECI value.
+func (e *eciResult) appendECI(value int) error {
+	e.encodeCurrentBytesIfAny()
+	eci, err := charset.GetECIByValue(value)
+	if err != nil {
+		return zxinggo.ErrFormat
+	}
+	if eci == nil {
+		return zxinggo.ErrFormat
+	}
+	e.currentECI = eci
+	return nil
+}
+
+func (e *eciResult) encodeCurrentBytesIfAny() {
+	if len(e.currentBytes) == 0 {
+		return
+	}
+	if e.currentECI == nil || e.isISO88591() {
+		// Default or ISO-8859-1: each byte maps directly to its Unicode code point
+		runes := make([]rune, len(e.currentBytes))
+		for i, b := range e.currentBytes {
+			runes[i] = rune(b)
+		}
+		e.result.WriteString(string(runes))
+	} else {
+		e.result.WriteString(charset.DecodeBytes(e.currentBytes, e.currentECI.GoName))
+	}
+	e.currentBytes = e.currentBytes[:0]
+}
+
+// isISO88591 returns true if the current ECI charset is ISO-8859-1.
+func (e *eciResult) isISO88591() bool {
+	if e.currentECI == nil {
+		return true
+	}
+	switch e.currentECI.GoName {
+	case "ISO8859_1", "ISO-8859-1":
+		return true
+	}
+	return false
+}
+
+// Len returns the length of the accumulated string so far.
+func (e *eciResult) Len() int {
+	// For isEmpty check: if no bytes accumulated and result is empty
+	return len(e.currentBytes) + e.result.Len()
+}
+
+// String returns the final decoded string.
+func (e *eciResult) String() string {
+	e.encodeCurrentBytesIfAny()
+	return e.result.String()
+}
 
 // Text compaction sub-modes
 type textMode int
@@ -87,10 +172,9 @@ type PDF417ResultMetadata struct {
 
 // decodeBitStream decodes PDF417 codewords into a DecoderResult.
 func decodeBitStream(codewords []int, ecLevel string) (*internal.DecoderResult, error) {
-	var result strings.Builder
-	result.Grow(len(codewords) * 2)
+	result := newECIResult(len(codewords) * 2)
 
-	codeIndex, err := textCompaction(codewords, 1, &result)
+	codeIndex, err := textCompaction(codewords, 1, result)
 	if err != nil {
 		return nil, err
 	}
@@ -100,12 +184,12 @@ func decodeBitStream(codewords []int, ecLevel string) (*internal.DecoderResult, 
 		codeIndex++
 		switch code {
 		case textCompactionModeLatch:
-			codeIndex, err = textCompaction(codewords, codeIndex, &result)
+			codeIndex, err = textCompaction(codewords, codeIndex, result)
 			if err != nil {
 				return nil, err
 			}
 		case byteCompactionModeLatch, byteCompactionModeLatch6:
-			codeIndex, err = byteCompaction(code, codewords, codeIndex, &result)
+			codeIndex, err = byteCompaction(code, codewords, codeIndex, result)
 			if err != nil {
 				return nil, err
 			}
@@ -113,18 +197,20 @@ func decodeBitStream(codewords []int, ecLevel string) (*internal.DecoderResult, 
 			result.WriteByte(byte(codewords[codeIndex]))
 			codeIndex++
 		case numericCompactionModeLatch:
-			codeIndex, err = numericCompaction(codewords, codeIndex, &result)
+			codeIndex, err = numericCompaction(codewords, codeIndex, result)
 			if err != nil {
 				return nil, err
 			}
 		case eciCharset:
-			// Skip ECI charset indicator and its value
+			if err := result.appendECI(codewords[codeIndex]); err != nil {
+				return nil, err
+			}
 			codeIndex++
 		case eciGeneralPurpose:
-			// Skip generic ECI; skip its 2 characters
+			// Can't do anything with generic ECI; skip its 2 characters
 			codeIndex += 2
 		case eciUserDefined:
-			// Skip user ECI; skip its 1 character
+			// Can't do anything with user ECI; skip its 1 character
 			codeIndex++
 		case beginMacroPDF417ControlBlock:
 			codeIndex, err = decodeMacroBlock(codewords, codeIndex, resultMetadata)
@@ -138,7 +224,7 @@ func decodeBitStream(codewords []int, ecLevel string) (*internal.DecoderResult, 
 			// Default to text compaction. During testing numerous barcodes
 			// appeared to be missing the starting mode.
 			codeIndex--
-			codeIndex, err = textCompaction(codewords, codeIndex, &result)
+			codeIndex, err = textCompaction(codewords, codeIndex, result)
 			if err != nil {
 				return nil, err
 			}
@@ -200,33 +286,33 @@ func decodeMacroBlock(codewords []int, codeIndex int, resultMetadata *PDF417Resu
 			codeIndex++
 			switch codewords[codeIndex] {
 			case macroPDF417OptionalFieldFileName:
-				var fileName strings.Builder
+				fileName := newECIResult(0)
 				var err error
-				codeIndex, err = textCompaction(codewords, codeIndex+1, &fileName)
+				codeIndex, err = textCompaction(codewords, codeIndex+1, fileName)
 				if err != nil {
 					return 0, err
 				}
 				resultMetadata.FileName = fileName.String()
 			case macroPDF417OptionalFieldSender:
-				var sender strings.Builder
+				sender := newECIResult(0)
 				var err error
-				codeIndex, err = textCompaction(codewords, codeIndex+1, &sender)
+				codeIndex, err = textCompaction(codewords, codeIndex+1, sender)
 				if err != nil {
 					return 0, err
 				}
 				resultMetadata.Sender = sender.String()
 			case macroPDF417OptionalFieldAddressee:
-				var addressee strings.Builder
+				addressee := newECIResult(0)
 				var err error
-				codeIndex, err = textCompaction(codewords, codeIndex+1, &addressee)
+				codeIndex, err = textCompaction(codewords, codeIndex+1, addressee)
 				if err != nil {
 					return 0, err
 				}
 				resultMetadata.Addressee = addressee.String()
 			case macroPDF417OptionalFieldSegmentCount:
-				var segmentCount strings.Builder
+				segmentCount := newECIResult(0)
 				var err error
-				codeIndex, err = numericCompaction(codewords, codeIndex+1, &segmentCount)
+				codeIndex, err = numericCompaction(codewords, codeIndex+1, segmentCount)
 				if err != nil {
 					return 0, err
 				}
@@ -236,9 +322,9 @@ func decodeMacroBlock(codewords []int, codeIndex int, resultMetadata *PDF417Resu
 				}
 				resultMetadata.SegmentCount = val
 			case macroPDF417OptionalFieldTimeStamp:
-				var timestamp strings.Builder
+				timestamp := newECIResult(0)
 				var err error
-				codeIndex, err = numericCompaction(codewords, codeIndex+1, &timestamp)
+				codeIndex, err = numericCompaction(codewords, codeIndex+1, timestamp)
 				if err != nil {
 					return 0, err
 				}
@@ -248,9 +334,9 @@ func decodeMacroBlock(codewords []int, codeIndex int, resultMetadata *PDF417Resu
 				}
 				resultMetadata.Timestamp = val
 			case macroPDF417OptionalFieldChecksum:
-				var checksum strings.Builder
+				checksum := newECIResult(0)
 				var err error
-				codeIndex, err = numericCompaction(codewords, codeIndex+1, &checksum)
+				codeIndex, err = numericCompaction(codewords, codeIndex+1, checksum)
 				if err != nil {
 					return 0, err
 				}
@@ -260,9 +346,9 @@ func decodeMacroBlock(codewords []int, codeIndex int, resultMetadata *PDF417Resu
 				}
 				resultMetadata.Checksum = val
 			case macroPDF417OptionalFieldFileSize:
-				var fileSize strings.Builder
+				fileSize := newECIResult(0)
 				var err error
-				codeIndex, err = numericCompaction(codewords, codeIndex+1, &fileSize)
+				codeIndex, err = numericCompaction(codewords, codeIndex+1, fileSize)
 				if err != nil {
 					return 0, err
 				}
@@ -298,7 +384,7 @@ func decodeMacroBlock(codewords []int, codeIndex int, resultMetadata *PDF417Resu
 }
 
 // textCompaction handles the Text Compaction mode of PDF417.
-func textCompaction(codewords []int, codeIndex int, result *strings.Builder) (int, error) {
+func textCompaction(codewords []int, codeIndex int, result *eciResult) (int, error) {
 	// 2 characters per codeword
 	size := (codewords[0] - codeIndex) * 2
 	if size < 0 {
@@ -335,7 +421,9 @@ func textCompaction(codewords []int, codeIndex int, result *strings.Builder) (in
 				index++
 			case eciCharset:
 				subMode = decodeTextCompaction(textCompactionData, byteCompactionData, index, result, subMode)
-				// Skip the ECI value
+				if err := result.appendECI(codewords[codeIndex]); err != nil {
+					return 0, err
+				}
 				codeIndex++
 				if codeIndex > codewords[0] {
 					return 0, zxinggo.ErrFormat
@@ -356,7 +444,7 @@ func textCompaction(codewords []int, codeIndex int, result *strings.Builder) (in
 
 // decodeTextCompaction decodes text compaction data and appends to result.
 func decodeTextCompaction(textCompactionData, byteCompactionData []int, length int,
-	result *strings.Builder, startMode textMode) textMode {
+	result *eciResult, startMode textMode) textMode {
 
 	subMode := startMode
 	priorToShiftMode := startMode
@@ -487,14 +575,16 @@ func decodeTextCompaction(textCompactionData, byteCompactionData []int, length i
 }
 
 // byteCompaction handles the Byte Compaction mode of PDF417.
-func byteCompaction(mode int, codewords []int, codeIndex int, result *strings.Builder) (int, error) {
+func byteCompaction(mode int, codewords []int, codeIndex int, result *eciResult) (int, error) {
 	end := false
 
 	for codeIndex < codewords[0] && !end {
 		// Handle leading ECIs
 		for codeIndex < codewords[0] && codewords[codeIndex] == eciCharset {
-			codeIndex++ // skip ECI indicator
-			codeIndex++ // skip ECI value
+			if err := result.appendECI(codewords[codeIndex+1]); err != nil {
+				return 0, err
+			}
+			codeIndex += 2
 		}
 
 		if codeIndex >= codewords[0] || codewords[codeIndex] >= textCompactionModeLatch {
@@ -524,7 +614,10 @@ func byteCompaction(mode int, codewords []int, codeIndex int, result *strings.Bu
 					if code < textCompactionModeLatch {
 						result.WriteByte(byte(code))
 					} else if code == eciCharset {
-						codeIndex++ // skip ECI value
+						if err := result.appendECI(codewords[codeIndex]); err != nil {
+							return 0, err
+						}
+						codeIndex++
 					} else {
 						codeIndex--
 						end = true
@@ -537,7 +630,7 @@ func byteCompaction(mode int, codewords []int, codeIndex int, result *strings.Bu
 }
 
 // numericCompaction handles the Numeric Compaction mode of PDF417.
-func numericCompaction(codewords []int, codeIndex int, result *strings.Builder) (int, error) {
+func numericCompaction(codewords []int, codeIndex int, result *eciResult) (int, error) {
 	count := 0
 	end := false
 

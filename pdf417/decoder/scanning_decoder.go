@@ -57,8 +57,12 @@ func Decode(image *bitutil.BitMatrix,
 
 	detectionResult.SetBoundingBox(boundingBox)
 	maxBarcodeColumn := detectionResult.BarcodeColumnCount() + 1
-	detectionResult.SetDetectionResultColumn(0, leftRowIndicatorColumn)
-	detectionResult.SetDetectionResultColumn(maxBarcodeColumn, rightRowIndicatorColumn)
+	if leftRowIndicatorColumn != nil {
+		detectionResult.SetDetectionResultColumn(0, leftRowIndicatorColumn)
+	}
+	if rightRowIndicatorColumn != nil {
+		detectionResult.SetDetectionResultColumn(maxBarcodeColumn, rightRowIndicatorColumn)
+	}
 
 	leftToRight := leftRowIndicatorColumn != nil
 	for barcodeColumnCount := 1; barcodeColumnCount <= maxBarcodeColumn; barcodeColumnCount++ {

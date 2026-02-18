@@ -31,14 +31,14 @@ func GetDecodedValue(moduleBitCount []int) int {
 }
 
 func sampleBitCounts(moduleBitCount []int) []int {
-	bitCountSum := sumInts(moduleBitCount)
+	bitCountSum := float32(sumInts(moduleBitCount))
 	result := make([]int, barsInModule)
 	bitCountIndex := 0
 	sumPreviousBits := 0
 	for i := 0; i < modulesInCodeword; i++ {
-		sampleIndex := float64(bitCountSum)/(2.0*float64(modulesInCodeword)) +
-			float64(i)*float64(bitCountSum)/float64(modulesInCodeword)
-		if float64(sumPreviousBits+moduleBitCount[bitCountIndex]) <= sampleIndex {
+		sampleIndex := bitCountSum/(2.0*float32(modulesInCodeword)) +
+			float32(i)*bitCountSum/float32(modulesInCodeword)
+		if float32(sumPreviousBits+moduleBitCount[bitCountIndex]) <= sampleIndex {
 			sumPreviousBits += moduleBitCount[bitCountIndex]
 			bitCountIndex++
 		}

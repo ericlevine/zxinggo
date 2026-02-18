@@ -54,7 +54,7 @@ func (dr *DetectionResult) GetDetectionResultColumns() []DetectionResultColumnI 
 
 func (dr *DetectionResult) adjustIndicatorColumnRowNumbers(col DetectionResultColumnI) {
 	if col != nil {
-		if ric, ok := col.(*DetectionResultRowIndicatorColumn); ok {
+		if ric, ok := col.(*DetectionResultRowIndicatorColumn); ok && ric != nil {
 			ric.AdjustCompleteIndicatorColumnRowNumbers(dr.barcodeMetadata)
 		}
 	}
