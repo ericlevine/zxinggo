@@ -157,8 +157,7 @@ func decodeHanziSegment(bs *bitutil.BitSource, result *strings.Builder, count in
 		offset += 2
 		count--
 	}
-	// Simple byte representation (GB2312 decoding would require external package)
-	result.Write(buf[:offset])
+	result.WriteString(charset.DecodeBytes(buf[:offset], "GB18030"))
 	return nil
 }
 
@@ -181,8 +180,7 @@ func decodeKanjiSegment(bs *bitutil.BitSource, result *strings.Builder, count in
 		offset += 2
 		count--
 	}
-	// Simple byte representation (Shift_JIS decoding would require external package)
-	result.Write(buf[:offset])
+	result.WriteString(charset.DecodeBytes(buf[:offset], "Shift_JIS"))
 	return nil
 }
 
@@ -197,17 +195,13 @@ func decodeByteSegment(bs *bitutil.BitSource, result *strings.Builder, count int
 		readBytes[i] = byte(val)
 	}
 
+	var encoding string
 	if currentECI != nil {
-		// Use ECI charset - for now just write raw bytes
-		result.Write(readBytes)
+		encoding = currentECI.GoName
 	} else {
-		encoding := charset.GuessEncoding(readBytes, characterSet)
-		if encoding == "UTF-8" || encoding == "ISO-8859-1" || encoding == "US-ASCII" {
-			result.Write(readBytes)
-		} else {
-			result.Write(readBytes)
-		}
+		encoding = charset.GuessEncoding(readBytes, characterSet)
 	}
+	result.WriteString(charset.DecodeBytes(readBytes, encoding))
 	return readBytes, nil
 }
 

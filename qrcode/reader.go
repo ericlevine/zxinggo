@@ -52,7 +52,7 @@ func (r *Reader) Decode(image *zxinggo.BinaryBitmap, opts *zxinggo.DecodeOptions
 	}
 
 	det := detector.NewDetector(matrix)
-	detectorResult, err := det.Detect(false)
+	detectorResult, err := det.Detect(opts.TryHarder)
 	if err != nil {
 		return nil, err
 	}
