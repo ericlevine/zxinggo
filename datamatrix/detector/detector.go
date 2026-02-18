@@ -26,102 +26,66 @@ type DetectorResult struct {
 // initSize is the default initial search size for WhiteRectangleDetector.
 const initSize = 10
 
+// detector holds the image and rectangle detector for detecting Data Matrix codes.
+type detector struct {
+	image             *bitutil.BitMatrix
+	rectangleDetector *whiteRectangleDetector
+}
+
 // Detect locates a Data Matrix barcode in the given binary image and returns
 // the sampled bit matrix along with the four corner points.
 func Detect(image *bitutil.BitMatrix) (*DetectorResult, error) {
-	// Step 1: use WhiteRectangleDetector to find a bounding white rectangle.
 	wrd, err := newWhiteRectangleDetector(image)
 	if err != nil {
 		return nil, err
 	}
-	cornerPoints, err := wrd.detect()
+	d := &detector{
+		image:             image,
+		rectangleDetector: wrd,
+	}
+	return d.detect()
+}
+
+func (d *detector) detect() (*DetectorResult, error) {
+	cornerPoints, err := d.rectangleDetector.detect()
 	if err != nil {
 		return nil, err
 	}
 
-	// cornerPoints are four points on the edges of the Data Matrix.
-	pointA := cornerPoints[0]
-	pointB := cornerPoints[1]
-	pointC := cornerPoints[2]
-	pointD := cornerPoints[3]
-
-	// Step 2: Count transitions between each pair of adjacent corners.
-	// The two edges with the fewest transitions are the solid L-shape edges.
-	transitions := make([]resultPointsAndTransitions, 0, 4)
-	transitions = append(transitions, transitionsBetween(image, pointA, pointB))
-	transitions = append(transitions, transitionsBetween(image, pointA, pointC))
-	transitions = append(transitions, transitionsBetween(image, pointB, pointD))
-	transitions = append(transitions, transitionsBetween(image, pointC, pointD))
-	sortByTransitions(transitions)
-
-	lSideOne := transitions[0]
-	lSideTwo := transitions[1]
-
-	// Determine which point is shared by both L-shape edges (the corner of the L).
-	pointCount := make(map[zxinggo.ResultPoint]int)
-	increment(pointCount, lSideOne.from)
-	increment(pointCount, lSideOne.to)
-	increment(pointCount, lSideTwo.from)
-	increment(pointCount, lSideTwo.to)
-
-	var maybeTopLeft, bottomLeft, maybeBottomRight zxinggo.ResultPoint
-	for point, count := range pointCount {
-		if count == 2 {
-			bottomLeft = point
-		} else {
-			if maybeTopLeft == (zxinggo.ResultPoint{}) {
-				maybeTopLeft = point
-			} else {
-				maybeBottomRight = point
-			}
-		}
-	}
-
-	if bottomLeft == (zxinggo.ResultPoint{}) ||
-		maybeTopLeft == (zxinggo.ResultPoint{}) ||
-		maybeBottomRight == (zxinggo.ResultPoint{}) {
+	points := d.detectSolid1(cornerPoints)
+	points = d.detectSolid2(points)
+	points[3] = d.correctTopRight(points)
+	if points[3] == (zxinggo.ResultPoint{}) {
 		return nil, zxinggo.ErrNotFound
 	}
+	points = d.shiftToModuleCenter(points)
 
-	// Order the three L-corner points using cross product to get consistent
-	// orientation: bottomLeft is the corner of the L, topLeft and bottomRight
-	// are the endpoints of the two solid edges.
-	candidates := [3]zxinggo.ResultPoint{maybeTopLeft, bottomLeft, maybeBottomRight}
-	candidates = zxinggo.OrderBestPatterns(candidates)
-	// OrderBestPatterns returns [pointA, pointB, pointC] where pointA is
-	// opposite the longest side (the vertex of the right angle), and pointB
-	// and pointC are the ends of the longest side.
-	bottomRight := candidates[0]
-	bottomLeft = candidates[1]
-	topLeft := candidates[2]
+	topLeft := points[0]
+	bottomLeft := points[1]
+	bottomRight := points[2]
+	topRight := points[3]
 
-	// The fourth corner (topRight) is whichever white-rectangle corner point
-	// was not used in the L-shape.
-	topRight := selectFourthPoint(pointA, pointB, pointC, pointD,
-		bottomLeft, topLeft, bottomRight)
-
-	// Step 3: Count modules along the two clock-track edges.
-	dimensionTop := transitionsBetween(image, topLeft, topRight).transitions + 2
-	dimensionRight := transitionsBetween(image, bottomRight, topRight).transitions + 2
-
-	// Data Matrix dimensions are always even.
-	if dimensionTop%2 != 0 {
+	dimensionTop := d.transitionsBetween(topLeft, topRight) + 1
+	dimensionRight := d.transitionsBetween(bottomRight, topRight) + 1
+	if (dimensionTop & 0x01) == 1 {
 		dimensionTop++
 	}
-	if dimensionRight%2 != 0 {
+	if (dimensionRight & 0x01) == 1 {
 		dimensionRight++
 	}
 
-	// Step 4: Build a perspective transform and sample the grid.
-	xform, err := createDataMatrixTransform(
-		topLeft, topRight, bottomRight, bottomLeft,
-		dimensionTop, dimensionRight)
-	if err != nil {
-		return nil, err
+	if 4*dimensionTop < 6*dimensionRight && 4*dimensionRight < 6*dimensionTop {
+		// The matrix is square
+		if dimensionTop > dimensionRight {
+			dimensionRight = dimensionTop
+		} else {
+			dimensionTop = dimensionRight
+		}
 	}
 
-	sampler := &transform.DefaultGridSampler{}
-	bits, err := sampler.SampleGridTransform(image, dimensionTop, dimensionRight, xform)
+	bits, err := sampleGrid(d.image,
+		topLeft, bottomLeft, bottomRight, topRight,
+		dimensionTop, dimensionRight)
 	if err != nil {
 		return nil, err
 	}
@@ -132,67 +96,256 @@ func Detect(image *bitutil.BitMatrix) (*DetectorResult, error) {
 	}, nil
 }
 
-// selectFourthPoint picks the white-rectangle corner point that is not one of
-// the three L-shape corners, i.e. the one farthest from bottomLeft.
-func selectFourthPoint(a, b, c, d, bl, tl, br zxinggo.ResultPoint) zxinggo.ResultPoint {
-	pts := []zxinggo.ResultPoint{a, b, c, d}
-	bestScore := -1.0
-	best := a
-	for _, p := range pts {
-		dBL := pointDistance(p, bl)
-		dTL := pointDistance(p, tl)
-		dBR := pointDistance(p, br)
-		// The fourth corner maximises the minimum distance to any of the
-		// three known corners (it should not be close to any of them).
-		minD := math.Min(dBL, math.Min(dTL, dBR))
-		if minD > bestScore {
-			bestScore = minD
-			best = p
+// shiftPoint shifts a point toward another point by 1/(div+1) of the distance.
+func shiftPoint(point, to zxinggo.ResultPoint, div int) zxinggo.ResultPoint {
+	x := (to.X - point.X) / float64(div+1)
+	y := (to.Y - point.Y) / float64(div+1)
+	return zxinggo.ResultPoint{X: point.X + x, Y: point.Y + y}
+}
+
+// moveAway moves a point away from a center point by 1 pixel in each axis.
+func moveAway(point zxinggo.ResultPoint, fromX, fromY float64) zxinggo.ResultPoint {
+	x := point.X
+	y := point.Y
+
+	if x < fromX {
+		x -= 1
+	} else {
+		x += 1
+	}
+
+	if y < fromY {
+		y -= 1
+	} else {
+		y += 1
+	}
+
+	return zxinggo.ResultPoint{X: x, Y: y}
+}
+
+// detectSolid1 detects the solid side which has the minimum number of transitions.
+func (d *detector) detectSolid1(cornerPoints []zxinggo.ResultPoint) []zxinggo.ResultPoint {
+	// 0  2
+	// 1  3
+	pointA := cornerPoints[0]
+	pointB := cornerPoints[1]
+	pointC := cornerPoints[3]
+	pointD := cornerPoints[2]
+
+	trAB := d.transitionsBetween(pointA, pointB)
+	trBC := d.transitionsBetween(pointB, pointC)
+	trCD := d.transitionsBetween(pointC, pointD)
+	trDA := d.transitionsBetween(pointD, pointA)
+
+	// 0..3
+	// :  :
+	// 1--2
+	min := trAB
+	points := []zxinggo.ResultPoint{pointD, pointA, pointB, pointC}
+	if min > trBC {
+		min = trBC
+		points[0] = pointA
+		points[1] = pointB
+		points[2] = pointC
+		points[3] = pointD
+	}
+	if min > trCD {
+		min = trCD
+		points[0] = pointB
+		points[1] = pointC
+		points[2] = pointD
+		points[3] = pointA
+	}
+	if min > trDA {
+		points[0] = pointC
+		points[1] = pointD
+		points[2] = pointA
+		points[3] = pointB
+	}
+
+	return points
+}
+
+// detectSolid2 detects a second solid side next to the first solid side.
+func (d *detector) detectSolid2(points []zxinggo.ResultPoint) []zxinggo.ResultPoint {
+	// A..D
+	// :  :
+	// B--C
+	pointA := points[0]
+	pointB := points[1]
+	pointC := points[2]
+	pointD := points[3]
+
+	// Transition detection on the edge is not stable.
+	// To safely detect, shift the points to the module center.
+	tr := d.transitionsBetween(pointA, pointD)
+	pointBs := shiftPoint(pointB, pointC, (tr+1)*4)
+	pointCs := shiftPoint(pointC, pointB, (tr+1)*4)
+	trBA := d.transitionsBetween(pointBs, pointA)
+	trCD := d.transitionsBetween(pointCs, pointD)
+
+	// 0..3
+	// |  :
+	// 1--2
+	if trBA < trCD {
+		// solid sides: A-B-C
+		points[0] = pointA
+		points[1] = pointB
+		points[2] = pointC
+		points[3] = pointD
+	} else {
+		// solid sides: B-C-D
+		points[0] = pointB
+		points[1] = pointC
+		points[2] = pointD
+		points[3] = pointA
+	}
+
+	return points
+}
+
+// correctTopRight calculates the corner position of the white top right module.
+func (d *detector) correctTopRight(points []zxinggo.ResultPoint) zxinggo.ResultPoint {
+	// A..D
+	// |  :
+	// B--C
+	pointA := points[0]
+	pointB := points[1]
+	pointC := points[2]
+	pointD := points[3]
+
+	// shift points for safe transition detection.
+	trTop := d.transitionsBetween(pointA, pointD)
+	trRight := d.transitionsBetween(pointB, pointD)
+	pointAs := shiftPoint(pointA, pointB, (trRight+1)*4)
+	pointCs := shiftPoint(pointC, pointB, (trTop+1)*4)
+
+	trTop = d.transitionsBetween(pointAs, pointD)
+	trRight = d.transitionsBetween(pointCs, pointD)
+
+	candidate1 := zxinggo.ResultPoint{
+		X: pointD.X + (pointC.X-pointB.X)/float64(trTop+1),
+		Y: pointD.Y + (pointC.Y-pointB.Y)/float64(trTop+1),
+	}
+	candidate2 := zxinggo.ResultPoint{
+		X: pointD.X + (pointA.X-pointB.X)/float64(trRight+1),
+		Y: pointD.Y + (pointA.Y-pointB.Y)/float64(trRight+1),
+	}
+
+	if !d.isValid(candidate1) {
+		if d.isValid(candidate2) {
+			return candidate2
 		}
+		return zxinggo.ResultPoint{}
 	}
-	return best
-}
-
-// createDataMatrixTransform builds a PerspectiveTransform that maps logical
-// module coordinates to image coordinates for grid sampling.
-func createDataMatrixTransform(
-	topLeft, topRight, bottomRight, bottomLeft zxinggo.ResultPoint,
-	dimensionTop, dimensionRight int,
-) (*transform.PerspectiveTransform, error) {
-	if dimensionTop <= 0 || dimensionRight <= 0 {
-		return nil, zxinggo.ErrNotFound
+	if !d.isValid(candidate2) {
+		return candidate1
 	}
-	return transform.QuadrilateralToQuadrilateral(
-		0.5, 0.5,
-		float64(dimensionTop)-0.5, 0.5,
-		float64(dimensionTop)-0.5, float64(dimensionRight)-0.5,
-		0.5, float64(dimensionRight)-0.5,
-		topLeft.X, topLeft.Y,
-		topRight.X, topRight.Y,
-		bottomRight.X, bottomRight.Y,
-		bottomLeft.X, bottomLeft.Y,
-	), nil
+
+	sumc1 := d.transitionsBetween(pointAs, candidate1) + d.transitionsBetween(pointCs, candidate1)
+	sumc2 := d.transitionsBetween(pointAs, candidate2) + d.transitionsBetween(pointCs, candidate2)
+
+	if sumc1 > sumc2 {
+		return candidate1
+	}
+	return candidate2
 }
 
-// ---------------------------------------------------------------------------
-// Transition counting helpers
-// ---------------------------------------------------------------------------
+// shiftToModuleCenter shifts the edge points to the module center.
+func (d *detector) shiftToModuleCenter(points []zxinggo.ResultPoint) []zxinggo.ResultPoint {
+	// A..D
+	// |  :
+	// B--C
+	pointA := points[0]
+	pointB := points[1]
+	pointC := points[2]
+	pointD := points[3]
 
-// resultPointsAndTransitions records the number of black/white transitions
-// between two points in the image.
-type resultPointsAndTransitions struct {
-	from        zxinggo.ResultPoint
-	to          zxinggo.ResultPoint
-	transitions int
+	// calculate pseudo dimensions
+	dimH := d.transitionsBetween(pointA, pointD) + 1
+	dimV := d.transitionsBetween(pointC, pointD) + 1
+
+	// shift points for safe dimension detection
+	pointAs := shiftPoint(pointA, pointB, dimV*4)
+	pointCs := shiftPoint(pointC, pointB, dimH*4)
+
+	// calculate more precise dimensions
+	dimH = d.transitionsBetween(pointAs, pointD) + 1
+	dimV = d.transitionsBetween(pointCs, pointD) + 1
+	if (dimH & 0x01) == 1 {
+		dimH++
+	}
+	if (dimV & 0x01) == 1 {
+		dimV++
+	}
+
+	// WhiteRectangleDetector returns points inside of the rectangle.
+	// We want points on the edges.
+	centerX := (pointA.X + pointB.X + pointC.X + pointD.X) / 4
+	centerY := (pointA.Y + pointB.Y + pointC.Y + pointD.Y) / 4
+	pointA = moveAway(pointA, centerX, centerY)
+	pointB = moveAway(pointB, centerX, centerY)
+	pointC = moveAway(pointC, centerX, centerY)
+	pointD = moveAway(pointD, centerX, centerY)
+
+	// shift points to the center of each module
+	pointAs = shiftPoint(pointA, pointB, dimV*4)
+	pointAs = shiftPoint(pointAs, pointD, dimH*4)
+	pointBs := shiftPoint(pointB, pointA, dimV*4)
+	pointBs = shiftPoint(pointBs, pointC, dimH*4)
+	pointCs = shiftPoint(pointC, pointD, dimV*4)
+	pointCs = shiftPoint(pointCs, pointB, dimH*4)
+	pointDs := shiftPoint(pointD, pointC, dimV*4)
+	pointDs = shiftPoint(pointDs, pointA, dimH*4)
+
+	return []zxinggo.ResultPoint{pointAs, pointBs, pointCs, pointDs}
 }
 
-// transitionsBetween counts the number of black-to-white and white-to-black
-// transitions along a line from 'from' to 'to' using Bresenham's algorithm.
-func transitionsBetween(image *bitutil.BitMatrix, from, to zxinggo.ResultPoint) resultPointsAndTransitions {
+// isValid checks whether a point is within the image bounds.
+func (d *detector) isValid(p zxinggo.ResultPoint) bool {
+	return p.X >= 0 && p.X <= float64(d.image.Width()-1) && p.Y > 0 && p.Y <= float64(d.image.Height()-1)
+}
+
+// sampleGrid samples the image grid to produce the bit matrix.
+func sampleGrid(image *bitutil.BitMatrix,
+	topLeft, bottomLeft, bottomRight, topRight zxinggo.ResultPoint,
+	dimensionX, dimensionY int) (*bitutil.BitMatrix, error) {
+
+	sampler := &transform.DefaultGridSampler{}
+
+	return sampler.SampleGrid(image,
+		dimensionX,
+		dimensionY,
+		0.5,
+		0.5,
+		float64(dimensionX)-0.5,
+		0.5,
+		float64(dimensionX)-0.5,
+		float64(dimensionY)-0.5,
+		0.5,
+		float64(dimensionY)-0.5,
+		topLeft.X,
+		topLeft.Y,
+		topRight.X,
+		topRight.Y,
+		bottomRight.X,
+		bottomRight.Y,
+		bottomLeft.X,
+		bottomLeft.Y,
+	)
+}
+
+// transitionsBetween counts the number of black/white transitions between two
+// points, using Bresenham's algorithm. This is a faithful port of the Java
+// ZXing Detector.transitionsBetween method.
+func (d *detector) transitionsBetween(from, to zxinggo.ResultPoint) int {
 	fromX := int(from.X)
 	fromY := int(from.Y)
 	toX := int(to.X)
 	toY := int(to.Y)
+	if toY > d.image.Height()-1 {
+		toY = d.image.Height() - 1
+	}
 
 	steep := iabs(toY-fromY) > iabs(toX-fromX)
 	if steep {
@@ -213,57 +366,33 @@ func transitionsBetween(image *bitutil.BitMatrix, from, to zxinggo.ResultPoint) 
 	}
 
 	transitions := 0
-	inBlack := imageGet(image, fromX, fromY, steep)
+	inBlack := d.image.Get(boolSelect(steep, fromY, fromX), boolSelect(steep, fromX, fromY))
 
 	y := fromY
-	for x := fromX; x != toX+xstep; x += xstep {
-		isBlack := imageGet(image, x, y, steep)
+	for x := fromX; x != toX; x += xstep {
+		isBlack := d.image.Get(boolSelect(steep, y, x), boolSelect(steep, x, y))
 		if isBlack != inBlack {
 			transitions++
 			inBlack = isBlack
 		}
 		err += dy
 		if err > 0 {
-			if y != toY {
-				y += ystep
+			if y == toY {
+				break
 			}
+			y += ystep
 			err -= dx
 		}
 	}
-	return resultPointsAndTransitions{from: from, to: to, transitions: transitions}
+	return transitions
 }
 
-// imageGet reads a pixel, swapping x/y when the line is steep.
-func imageGet(image *bitutil.BitMatrix, x, y int, steep bool) bool {
-	if steep {
-		return image.Get(y, x)
+// boolSelect returns a if cond is true, otherwise b.
+func boolSelect(cond bool, a, b int) int {
+	if cond {
+		return a
 	}
-	return image.Get(x, y)
-}
-
-// sortByTransitions sorts in ascending order of transition count (insertion sort).
-func sortByTransitions(t []resultPointsAndTransitions) {
-	for i := 1; i < len(t); i++ {
-		key := t[i]
-		j := i - 1
-		for j >= 0 && t[j].transitions > key.transitions {
-			t[j+1] = t[j]
-			j--
-		}
-		t[j+1] = key
-	}
-}
-
-// increment adds one to the count for a point in a frequency map.
-func increment(m map[zxinggo.ResultPoint]int, p zxinggo.ResultPoint) {
-	m[p]++
-}
-
-// pointDistance returns the Euclidean distance between two ResultPoints.
-func pointDistance(a, b zxinggo.ResultPoint) float64 {
-	dx := a.X - b.X
-	dy := a.Y - b.Y
-	return math.Sqrt(dx*dx + dy*dy)
+	return b
 }
 
 // iabs returns the absolute value of an int.
@@ -279,7 +408,7 @@ func iabs(x int) int {
 // ---------------------------------------------------------------------------
 
 // whiteRectangleDetector locates a white rectangular region surrounding a
-// barcode in a binary image.  Starting from the center it expands outward
+// barcode in a binary image. Starting from the center it expands outward
 // until each edge encounters black pixels, then walks the edges to find
 // precise corner coordinates.
 type whiteRectangleDetector struct {
@@ -296,14 +425,15 @@ func newWhiteRectangleDetector(image *bitutil.BitMatrix) (*whiteRectangleDetecto
 	return newWhiteRectangleDetectorWithInit(image, initSize, image.Width()/2, image.Height()/2)
 }
 
-func newWhiteRectangleDetectorWithInit(image *bitutil.BitMatrix, halfInit, x, y int) (*whiteRectangleDetector, error) {
+func newWhiteRectangleDetectorWithInit(image *bitutil.BitMatrix, initSz, x, y int) (*whiteRectangleDetector, error) {
 	w := image.Width()
 	h := image.Height()
 
-	li := x - halfInit
-	ri := x + halfInit
-	ui := y - halfInit
-	di := y + halfInit
+	halfsize := initSz / 2
+	li := x - halfsize
+	ri := x + halfsize
+	ui := y - halfsize
+	di := y + halfsize
 
 	if ui < 0 || li < 0 || di >= h || ri >= w {
 		return nil, zxinggo.ErrNotFound
@@ -410,101 +540,98 @@ func (d *whiteRectangleDetector) detect() ([]zxinggo.ResultPoint, error) {
 	}
 
 	maxSize := right - left
-	if down-up > maxSize {
-		maxSize = down - up
-	}
 
-	// Walk each edge to find the precise corner points.
-	var (
-		pA, pB, pC, pD zxinggo.ResultPoint
-		found          bool
-	)
-
-	// Bottom-left area: scan from left side toward bottom.
+	// Find the four corner points by walking edges.
+	var z zxinggo.ResultPoint
+	var found bool
 	for i := 1; !found && i < maxSize; i++ {
-		pA, found = d.getBlackPointOnSegment(left, down-i, left+i, down)
+		z, found = d.getBlackPointOnSegment(float64(left), float64(down-i), float64(left+i), float64(down))
 	}
 	if !found {
 		return nil, zxinggo.ErrNotFound
 	}
 
-	// Top-left area: scan from left side toward top.
+	var t zxinggo.ResultPoint
 	found = false
 	for i := 1; !found && i < maxSize; i++ {
-		pB, found = d.getBlackPointOnSegment(left, up+i, left+i, up)
+		t, found = d.getBlackPointOnSegment(float64(left), float64(up+i), float64(left+i), float64(up))
 	}
 	if !found {
 		return nil, zxinggo.ErrNotFound
 	}
 
-	// Top-right area: scan from right side toward top.
+	var x zxinggo.ResultPoint
 	found = false
 	for i := 1; !found && i < maxSize; i++ {
-		pC, found = d.getBlackPointOnSegment(right, up+i, right-i, up)
+		x, found = d.getBlackPointOnSegment(float64(right), float64(up+i), float64(right-i), float64(up))
 	}
 	if !found {
 		return nil, zxinggo.ErrNotFound
 	}
 
-	// Bottom-right area: scan from right side toward bottom.
+	var y zxinggo.ResultPoint
 	found = false
 	for i := 1; !found && i < maxSize; i++ {
-		pD, found = d.getBlackPointOnSegment(right, down-i, right-i, down)
+		y, found = d.getBlackPointOnSegment(float64(right), float64(down-i), float64(right-i), float64(down))
 	}
 	if !found {
 		return nil, zxinggo.ErrNotFound
 	}
 
-	// Nudge corners inward slightly.
-	ce := d.centerEdges(pA, pB, pC, pD)
-	return []zxinggo.ResultPoint{ce[0], ce[1], ce[2], ce[3]}, nil
+	return d.centerEdges(y, z, x, t), nil
 }
 
-// centerEdges nudges the four corners slightly inward so that the sample
-// points lie inside the barcode rather than on the quiet zone border.
-func (d *whiteRectangleDetector) centerEdges(y, z, x, t zxinggo.ResultPoint) [4]zxinggo.ResultPoint {
-	//    t --- z
-	//    |     |
-	//    y --- x
+// centerEdges recenters the points at a constant distance towards the center.
+func (d *whiteRectangleDetector) centerEdges(y, z, x, t zxinggo.ResultPoint) []zxinggo.ResultPoint {
+	//
+	//       t            t
+	//  z                      x
+	//        x    OR    z
+	//   y                    y
+	//
 
-	yi, yj := y.X, y.Y
-	zi, zj := z.X, z.Y
-	xi, xj := x.X, x.Y
-	ti, tj := t.X, t.Y
-
-	if pointDistance(y, t) < float64(d.width)/7.0 {
-		return [4]zxinggo.ResultPoint{
-			{X: (yi + ti) / 2.0, Y: (yj + tj) / 2.0},
-			{X: (zi + xi) / 2.0, Y: (zj + xj) / 2.0},
-			{X: (yi + xi) / 2.0, Y: (yj + xj) / 2.0},
-			{X: (ti + zi) / 2.0, Y: (tj + zj) / 2.0},
-		}
-	}
+	yi := y.X
+	yj := y.Y
+	zi := z.X
+	zj := z.Y
+	xi := x.X
+	xj := x.Y
+	ti := t.X
+	tj := t.Y
 
 	const corr = 1.0
-	return [4]zxinggo.ResultPoint{
-		{X: yi + corr, Y: yj + corr},
+
+	if yi < float64(d.width)/2.0 {
+		return []zxinggo.ResultPoint{
+			{X: ti - corr, Y: tj + corr},
+			{X: zi + corr, Y: zj + corr},
+			{X: xi - corr, Y: xj - corr},
+			{X: yi + corr, Y: yj - corr},
+		}
+	}
+	return []zxinggo.ResultPoint{
+		{X: ti + corr, Y: tj + corr},
 		{X: zi + corr, Y: zj - corr},
 		{X: xi - corr, Y: xj + corr},
-		{X: ti - corr, Y: tj - corr},
+		{X: yi - corr, Y: yj - corr},
 	}
 }
 
 // getBlackPointOnSegment walks from (aX,aY) toward (bX,bY) and returns the
 // first black pixel found, or false if none is found.
-func (d *whiteRectangleDetector) getBlackPointOnSegment(aX, aY, bX, bY int) (zxinggo.ResultPoint, bool) {
-	dist := distanceInt(aX, aY, bX, bY)
+func (d *whiteRectangleDetector) getBlackPointOnSegment(aX, aY, bX, bY float64) (zxinggo.ResultPoint, bool) {
+	dist := mathRound(distanceFloat(aX, aY, bX, bY))
 	if dist < 1 {
 		return zxinggo.ResultPoint{}, false
 	}
-	xStep := float64(bX-aX) / dist
-	yStep := float64(bY-aY) / dist
+	xStep := (bX - aX) / float64(dist)
+	yStep := (bY - aY) / float64(dist)
 
-	for i := 0.0; i < dist; i++ {
-		x := int(float64(aX) + i*xStep)
-		y := int(float64(aY) + i*yStep)
-		if x >= 0 && x < d.width && y >= 0 && y < d.height && d.image.Get(x, y) {
-			return zxinggo.ResultPoint{X: float64(x), Y: float64(y)}, true
+	for i := 0; i < dist; i++ {
+		px := mathRound(aX + float64(i)*xStep)
+		py := mathRound(aY + float64(i)*yStep)
+		if px >= 0 && px < d.width && py >= 0 && py < d.height && d.image.Get(px, py) {
+			return zxinggo.ResultPoint{X: float64(px), Y: float64(py)}, true
 		}
 	}
 	return zxinggo.ResultPoint{}, false
@@ -516,13 +643,13 @@ func (d *whiteRectangleDetector) getBlackPointOnSegment(aX, aY, bX, bY int) (zxi
 func (d *whiteRectangleDetector) containsBlackPoint(a, b, fixed int, horizontal bool) bool {
 	if horizontal {
 		for x := a; x <= b; x++ {
-			if x >= 0 && x < d.width && fixed >= 0 && fixed < d.height && d.image.Get(x, fixed) {
+			if d.image.Get(x, fixed) {
 				return true
 			}
 		}
 	} else {
 		for y := a; y <= b; y++ {
-			if fixed >= 0 && fixed < d.width && y >= 0 && y < d.height && d.image.Get(fixed, y) {
+			if d.image.Get(fixed, y) {
 				return true
 			}
 		}
@@ -530,9 +657,17 @@ func (d *whiteRectangleDetector) containsBlackPoint(a, b, fixed int, horizontal 
 	return false
 }
 
-// distanceInt returns the Euclidean distance between two integer-coordinate points.
-func distanceInt(aX, aY, bX, bY int) float64 {
-	dx := float64(aX - bX)
-	dy := float64(aY - bY)
+// mathRound rounds a float64 to the nearest int (matching Java's MathUtils.round).
+func mathRound(d float64) int {
+	if d < 0 {
+		return int(d - 0.5)
+	}
+	return int(d + 0.5)
+}
+
+// distanceFloat returns the Euclidean distance between two points.
+func distanceFloat(aX, aY, bX, bY float64) float64 {
+	dx := aX - bX
+	dy := aY - bY
 	return math.Sqrt(dx*dx + dy*dy)
 }

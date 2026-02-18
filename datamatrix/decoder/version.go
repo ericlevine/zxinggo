@@ -47,10 +47,10 @@ func (v *Version) TotalCodewords() int { return v.totalCodewords }
 // GetECBlocks returns the error-correction block layout.
 func (v *Version) GetECBlocks() ECBlocks { return v.ecBlocks }
 
-func newVersion(versionNumber, symbolSizeRows, symbolSizeColumns, dataRegionSizeRows, dataRegionSizeColumns, totalECCodewords int, blocks ...ECB) Version {
+func newVersion(versionNumber, symbolSizeRows, symbolSizeColumns, dataRegionSizeRows, dataRegionSizeColumns, ecCodewordsPerBlock int, blocks ...ECB) Version {
 	total := 0
 	for _, block := range blocks {
-		total += block.Count * (block.DataCodewords + totalECCodewords/countBlocks(blocks))
+		total += block.Count * (block.DataCodewords + ecCodewordsPerBlock)
 	}
 	return Version{
 		versionNumber:         versionNumber,
@@ -59,22 +59,11 @@ func newVersion(versionNumber, symbolSizeRows, symbolSizeColumns, dataRegionSize
 		dataRegionSizeRows:    dataRegionSizeRows,
 		dataRegionSizeColumns: dataRegionSizeColumns,
 		ecBlocks: ECBlocks{
-			ECCodewords: totalECCodewords,
+			ECCodewords: ecCodewordsPerBlock,
 			Blocks:      blocks,
 		},
 		totalCodewords: total,
 	}
-}
-
-func countBlocks(blocks []ECB) int {
-	total := 0
-	for _, b := range blocks {
-		total += b.Count
-	}
-	if total == 0 {
-		return 1
-	}
-	return total
 }
 
 // GetVersionForDimensions returns the Version for a Data Matrix symbol of the
@@ -88,12 +77,12 @@ func GetVersionForDimensions(numRows, numColumns int) (*Version, error) {
 	return nil, fmt.Errorf("datamatrix/decoder: no version for dimensions %dx%d", numRows, numColumns)
 }
 
-// Complete ECC-200 symbol table — 24 square sizes + 6 rectangular sizes = 30 entries.
-// Data from ISO/IEC 16022 Table 7 (ECC 200 symbol attributes).
+// Complete ECC-200 symbol table — 24 square + 6 rectangular + 18 DMRE = 48 entries.
+// Data from ISO/IEC 16022 Table 7 and ISO 21471:2020 (DMRE) 5.5.1 Table 7.
 //
 // Fields per entry: versionNumber, symbolSizeRows, symbolSizeColumns,
 //   dataRegionSizeRows, dataRegionSizeColumns, totalECCodewords, ECB{count, dataCodewords}...
-var versions = [30]Version{
+var versions = [48]Version{
 	// Square symbols
 	newVersion(1, 10, 10, 8, 8, 5, ECB{1, 3}),
 	newVersion(2, 12, 12, 10, 10, 7, ECB{1, 5}),
@@ -127,4 +116,24 @@ var versions = [30]Version{
 	newVersion(28, 12, 36, 10, 16, 18, ECB{1, 22}),
 	newVersion(29, 16, 36, 14, 16, 24, ECB{1, 32}),
 	newVersion(30, 16, 48, 14, 22, 28, ECB{1, 49}),
+
+	// ISO 21471:2020 (DMRE) 5.5.1 Table 7
+	newVersion(31, 8, 48, 6, 22, 15, ECB{1, 18}),
+	newVersion(32, 8, 64, 6, 14, 18, ECB{1, 24}),
+	newVersion(33, 8, 80, 6, 18, 22, ECB{1, 32}),
+	newVersion(34, 8, 96, 6, 22, 28, ECB{1, 38}),
+	newVersion(35, 8, 120, 6, 18, 32, ECB{1, 49}),
+	newVersion(36, 8, 144, 6, 22, 36, ECB{1, 63}),
+	newVersion(37, 12, 64, 10, 14, 27, ECB{1, 43}),
+	newVersion(38, 12, 88, 10, 20, 36, ECB{1, 64}),
+	newVersion(39, 16, 64, 14, 14, 36, ECB{1, 62}),
+	newVersion(40, 20, 36, 18, 16, 28, ECB{1, 44}),
+	newVersion(41, 20, 44, 18, 20, 34, ECB{1, 56}),
+	newVersion(42, 20, 64, 18, 14, 42, ECB{1, 84}),
+	newVersion(43, 22, 48, 20, 22, 38, ECB{1, 72}),
+	newVersion(44, 24, 48, 22, 22, 41, ECB{1, 80}),
+	newVersion(45, 24, 64, 22, 14, 46, ECB{1, 108}),
+	newVersion(46, 26, 40, 24, 18, 38, ECB{1, 70}),
+	newVersion(47, 26, 48, 24, 22, 42, ECB{1, 90}),
+	newVersion(48, 26, 64, 24, 14, 50, ECB{1, 118}),
 }

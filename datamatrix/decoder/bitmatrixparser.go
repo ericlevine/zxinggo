@@ -75,7 +75,8 @@ func extractDataRegion(bitMatrix *bitutil.BitMatrix, version *Version) *bitutil.
 }
 
 // readMappingMatrix walks the mapping matrix in the Data Matrix diagonal pattern
-// and extracts codewords.
+// and extracts codewords. This is a faithful port of the Java ZXing
+// BitMatrixParser.readCodewords method.
 func readMappingMatrix(mappingBitMatrix *bitutil.BitMatrix, numRows, numColumns int, version *Version) ([]byte, error) {
 	totalCodewords := version.TotalCodewords()
 	result := make([]byte, totalCodewords)
@@ -90,79 +91,71 @@ func readMappingMatrix(mappingBitMatrix *bitutil.BitMatrix, numRows, numColumns 
 	row := 4
 	column := 0
 
+	corner1Read := false
+	corner2Read := false
+	corner3Read := false
+	corner4Read := false
+
+	// do-while loop
 	for {
-		// Check the four corner cases first
-		if row == numRows && column == 0 {
-			if codewordIndex < totalCodewords {
-				result[codewordIndex] = readCorner1(mappingBitMatrix, numRows, numColumns, read)
-				codewordIndex++
-			}
+		// Check the four corner cases first (else-if chain)
+		if row == numRows && column == 0 && !corner1Read {
+			result[codewordIndex] = readCorner1(mappingBitMatrix, numRows, numColumns, read)
+			codewordIndex++
 			row -= 2
 			column += 2
-		}
-
-		if row == numRows-2 && column == 0 && numColumns%4 != 0 {
-			if codewordIndex < totalCodewords {
-				result[codewordIndex] = readCorner2(mappingBitMatrix, numRows, numColumns, read)
-				codewordIndex++
-			}
+			corner1Read = true
+		} else if row == numRows-2 && column == 0 && (numColumns&0x03) != 0 && !corner2Read {
+			result[codewordIndex] = readCorner2(mappingBitMatrix, numRows, numColumns, read)
+			codewordIndex++
 			row -= 2
 			column += 2
-		}
-
-		if row == numRows+4 && column == 2 && numColumns%8 == 0 {
-			if codewordIndex < totalCodewords {
-				result[codewordIndex] = readCorner3(mappingBitMatrix, numRows, numColumns, read)
-				codewordIndex++
-			}
+			corner2Read = true
+		} else if row == numRows+4 && column == 2 && (numColumns&0x07) == 0 && !corner3Read {
+			result[codewordIndex] = readCorner3(mappingBitMatrix, numRows, numColumns, read)
+			codewordIndex++
 			row -= 2
 			column += 2
-		}
-
-		if row == numRows-2 && column == 0 && numColumns%8 == 4 {
-			if codewordIndex < totalCodewords {
-				result[codewordIndex] = readCorner4(mappingBitMatrix, numRows, numColumns, read)
-				codewordIndex++
-			}
+			corner3Read = true
+		} else if row == numRows-2 && column == 0 && (numColumns&0x07) == 4 && !corner4Read {
+			result[codewordIndex] = readCorner4(mappingBitMatrix, numRows, numColumns, read)
+			codewordIndex++
 			row -= 2
 			column += 2
-		}
-
-		// Sweep upward-right (do-while: body runs first, bounds checked after step)
-		for {
-			if row >= 0 && row < numRows && column >= 0 && column < numColumns && !read[row][column] {
-				if codewordIndex < totalCodewords {
+			corner4Read = true
+		} else {
+			// Sweep upward-right (do-while)
+			for {
+				if row < numRows && column >= 0 && !read[row][column] {
 					result[codewordIndex] = readUtah(mappingBitMatrix, row, column, numRows, numColumns, read)
 					codewordIndex++
 				}
+				row -= 2
+				column += 2
+				if !(row >= 0 && column < numColumns) {
+					break
+				}
 			}
-			row -= 2
-			column += 2
-			if !(row >= 0 && column < numColumns) {
-				break
-			}
-		}
-		row += 1
-		column += 3
+			row += 1
+			column += 3
 
-		// Sweep downward-left (do-while: body runs first, bounds checked after step)
-		for {
-			if row >= 0 && row < numRows && column >= 0 && column < numColumns && !read[row][column] {
-				if codewordIndex < totalCodewords {
+			// Sweep downward-left (do-while)
+			for {
+				if row >= 0 && column < numColumns && !read[row][column] {
 					result[codewordIndex] = readUtah(mappingBitMatrix, row, column, numRows, numColumns, read)
 					codewordIndex++
 				}
+				row += 2
+				column -= 2
+				if !(row < numRows && column >= 0) {
+					break
+				}
 			}
-			row += 2
-			column -= 2
-			if !(row < numRows && column >= 0) {
-				break
-			}
+			row += 3
+			column += 1
 		}
-		row += 3
-		column += 1
 
-		if row >= numRows && column >= numColumns {
+		if !(row < numRows || column < numColumns) {
 			break
 		}
 	}
@@ -174,22 +167,20 @@ func readMappingMatrix(mappingBitMatrix *bitutil.BitMatrix, numRows, numColumns 
 }
 
 // readModule reads a single module from the mapping matrix, handling wrap-around
-// for modules that extend past the edges.
+// for modules that extend past the edges. This is a faithful port of the Java
+// BitMatrixParser.readModule method.
 func readModule(mappingBitMatrix *bitutil.BitMatrix, row, column, numRows, numColumns int, read [][]bool) bool {
-	// Adjust for negative coordinates (wrap around)
+	// Adjust the row and column indices based on boundary wrapping
 	if row < 0 {
 		row += numRows
-		column += 4 - ((numRows + 4) % 8)
+		column += 4 - ((numRows + 4) & 0x07)
 	}
 	if column < 0 {
 		column += numColumns
-		row += 4 - ((numColumns + 4) % 8)
+		row += 4 - ((numColumns + 4) & 0x07)
 	}
 	if row >= numRows {
 		row -= numRows
-	}
-	if column >= numColumns {
-		column -= numColumns
 	}
 	read[row][column] = true
 	return mappingBitMatrix.Get(column, row)

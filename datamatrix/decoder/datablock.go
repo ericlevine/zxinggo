@@ -9,6 +9,7 @@ type DataBlock struct {
 }
 
 // GetDataBlocks separates interleaved Data Matrix codewords into data and EC blocks.
+// This is a faithful port of the Java ZXing DataBlock.getDataBlocks method.
 // Data Matrix interleaves codewords across blocks: first all data codewords are
 // interleaved, then all EC codewords are interleaved.
 func GetDataBlocks(rawCodewords []byte, version *Version) ([]DataBlock, error) {
@@ -24,42 +25,37 @@ func GetDataBlocks(rawCodewords []byte, version *Version) ([]DataBlock, error) {
 		return nil, fmt.Errorf("datamatrix/decoder: no EC blocks defined")
 	}
 
-	// EC codewords per block
-	ecCodewordsPerBlock := ecBlocks.ECCodewords / totalBlocks
+	// ECCodewords is the number of EC codewords per block
+	ecCodewordsPerBlock := ecBlocks.ECCodewords
 
+	// Now establish DataBlocks of the appropriate size and number of data codewords
 	result := make([]DataBlock, totalBlocks)
-	blockIndex := 0
+	numResultBlocks := 0
 	for _, block := range ecBlocks.Blocks {
 		for i := 0; i < block.Count; i++ {
 			numDataCodewords := block.DataCodewords
-			numBlockCodewords := numDataCodewords + ecCodewordsPerBlock
-			result[blockIndex] = DataBlock{
+			numBlockCodewords := ecCodewordsPerBlock + numDataCodewords
+			result[numResultBlocks] = DataBlock{
 				NumDataCodewords: numDataCodewords,
 				Codewords:        make([]byte, numBlockCodewords),
 			}
-			blockIndex++
+			numResultBlocks++
 		}
 	}
 
-	// Data Matrix interleaving: data codewords are interleaved across blocks,
-	// then EC codewords are interleaved across blocks.
+	// All blocks have the same amount of data, except that the last n
+	// (where n may be 0) have 1 less byte. Figure out where these start.
+	// There is only one case where there is a difference for Data Matrix for size 144
+	longerBlocksTotalCodewords := len(result[0].Codewords)
 
-	// Find the shorter and longer data block sizes
-	shorterBlocksNumDataCodewords := result[0].NumDataCodewords
-	longerBlocksStartAt := totalBlocks
+	longerBlocksNumDataCodewords := longerBlocksTotalCodewords - ecCodewordsPerBlock
+	shorterBlocksNumDataCodewords := longerBlocksNumDataCodewords - 1
 
-	// Find where longer blocks start (blocks may differ by 1 data codeword)
-	for i := 0; i < totalBlocks; i++ {
-		if result[i].NumDataCodewords > shorterBlocksNumDataCodewords {
-			longerBlocksStartAt = i
-			break
-		}
-	}
-
-	// De-interleave data codewords
+	// The last elements of result may be 1 element shorter for 144 matrix
+	// first fill out as many elements as all of them have minus 1
 	rawCodewordsOffset := 0
 	for i := 0; i < shorterBlocksNumDataCodewords; i++ {
-		for j := 0; j < totalBlocks; j++ {
+		for j := 0; j < numResultBlocks; j++ {
 			if rawCodewordsOffset >= len(rawCodewords) {
 				return nil, fmt.Errorf("datamatrix/decoder: not enough raw codewords")
 			}
@@ -68,23 +64,36 @@ func GetDataBlocks(rawCodewords []byte, version *Version) ([]DataBlock, error) {
 		}
 	}
 
-	// Handle longer blocks (extra data codeword)
-	for j := longerBlocksStartAt; j < totalBlocks; j++ {
+	// Fill out the last data block in the longer ones
+	specialVersion := version.VersionNumber() == 24
+	numLongerBlocks := numResultBlocks
+	if specialVersion {
+		numLongerBlocks = 8
+	}
+	for j := 0; j < numLongerBlocks; j++ {
 		if rawCodewordsOffset >= len(rawCodewords) {
 			return nil, fmt.Errorf("datamatrix/decoder: not enough raw codewords")
 		}
-		result[j].Codewords[shorterBlocksNumDataCodewords] = rawCodewords[rawCodewordsOffset]
+		result[j].Codewords[longerBlocksNumDataCodewords-1] = rawCodewords[rawCodewordsOffset]
 		rawCodewordsOffset++
 	}
 
-	// De-interleave EC codewords
-	for i := 0; i < ecCodewordsPerBlock; i++ {
-		for j := 0; j < totalBlocks; j++ {
-			iOffset := result[j].NumDataCodewords + i
+	// Now add in error correction blocks
+	max := len(result[0].Codewords)
+	for i := longerBlocksNumDataCodewords; i < max; i++ {
+		for j := 0; j < numResultBlocks; j++ {
+			jOffset := j
+			iOffset := i
+			if specialVersion {
+				jOffset = (j + 8) % numResultBlocks
+				if jOffset > 7 {
+					iOffset = i - 1
+				}
+			}
 			if rawCodewordsOffset >= len(rawCodewords) {
 				return nil, fmt.Errorf("datamatrix/decoder: not enough raw codewords")
 			}
-			result[j].Codewords[iOffset] = rawCodewords[rawCodewordsOffset]
+			result[jOffset].Codewords[iOffset] = rawCodewords[rawCodewordsOffset]
 			rawCodewordsOffset++
 		}
 	}

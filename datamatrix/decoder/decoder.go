@@ -41,27 +41,38 @@ func (d *Decoder) Decode(bits *bitutil.BitMatrix) (*DecoderResult, error) {
 	}
 
 	resultBytes := make([]byte, totalDataBytes)
-	dataBlocksOffset := 0
+	dataBlocksCount := len(dataBlocks)
+	totalErrorsCorrected := 0
 
-	for _, db := range dataBlocks {
-		codewordBytes := db.Codewords
-		numDataCodewords := db.NumDataCodewords
+	for j := 0; j < dataBlocksCount; j++ {
+		codewordBytes := dataBlocks[j].Codewords
+		numDataCodewords := dataBlocks[j].NumDataCodewords
 
-		if err := d.correctErrors(codewordBytes, numDataCodewords); err != nil {
+		corrected, err := d.correctErrors(codewordBytes, numDataCodewords)
+		if err != nil {
 			return nil, err
 		}
+		totalErrorsCorrected += corrected
 
-		// Copy the corrected data codewords to the result
-		copy(resultBytes[dataBlocksOffset:], codewordBytes[:numDataCodewords])
-		dataBlocksOffset += numDataCodewords
+		// De-interlace data blocks: block j's i-th codeword goes to
+		// position i*dataBlocksCount+j in the result.
+		for i := 0; i < numDataCodewords; i++ {
+			resultBytes[i*dataBlocksCount+j] = codewordBytes[i]
+		}
 	}
 
 	// Step 4: Decode the data codewords into text.
-	return DecodeBitStream(resultBytes)
+	dr, err := DecodeBitStream(resultBytes)
+	if err != nil {
+		return nil, err
+	}
+	dr.ErrorsCorrected = totalErrorsCorrected
+	dr.SymbologyModifier = 1
+	return dr, nil
 }
 
 // correctErrors uses Reed-Solomon error correction to fix errors in a block.
-func (d *Decoder) correctErrors(codewordBytes []byte, numDataCodewords int) error {
+func (d *Decoder) correctErrors(codewordBytes []byte, numDataCodewords int) (int, error) {
 	numCodewords := len(codewordBytes)
 
 	// Convert to int slice for RS decoder
@@ -71,14 +82,14 @@ func (d *Decoder) correctErrors(codewordBytes []byte, numDataCodewords int) erro
 	}
 
 	numECCodewords := numCodewords - numDataCodewords
-	_, err := d.rsDecoder.Decode(codewordsInts, numECCodewords)
+	errorsCorrected, err := d.rsDecoder.Decode(codewordsInts, numECCodewords)
 	if err != nil {
-		return zxinggo.ErrChecksum
+		return 0, zxinggo.ErrChecksum
 	}
 
 	// Copy corrected values back
 	for i := 0; i < numDataCodewords; i++ {
 		codewordBytes[i] = byte(codewordsInts[i])
 	}
-	return nil
+	return errorsCorrected, nil
 }

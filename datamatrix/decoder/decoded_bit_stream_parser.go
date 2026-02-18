@@ -8,8 +8,10 @@ import (
 
 // DecoderResult holds the decoded text and raw bytes from a Data Matrix barcode.
 type DecoderResult struct {
-	Text     string
-	RawBytes []byte
+	Text            string
+	RawBytes        []byte
+	ErrorsCorrected int
+	SymbologyModifier int
 }
 
 // Data Matrix encoding modes

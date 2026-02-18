@@ -2,6 +2,8 @@
 package datamatrix
 
 import (
+	"fmt"
+
 	zxinggo "github.com/ericlevine/zxinggo"
 	"github.com/ericlevine/zxinggo/bitutil"
 	"github.com/ericlevine/zxinggo/datamatrix/decoder"
@@ -41,7 +43,8 @@ func (r *Reader) Decode(image *zxinggo.BinaryBitmap, opts *zxinggo.DecodeOptions
 			return nil, err
 		}
 		result := zxinggo.NewResult(dr.Text, dr.RawBytes, nil, zxinggo.FormatDataMatrix)
-		result.PutMetadata(zxinggo.MetadataSymbologyIdentifier, "]d1")
+		result.PutMetadata(zxinggo.MetadataSymbologyIdentifier, fmt.Sprintf("]d%d", dr.SymbologyModifier))
+		result.PutMetadata(zxinggo.MetadataErrorsCorrected, dr.ErrorsCorrected)
 		return result, nil
 	}
 
@@ -56,7 +59,8 @@ func (r *Reader) Decode(image *zxinggo.BinaryBitmap, opts *zxinggo.DecodeOptions
 	}
 
 	result := zxinggo.NewResult(dr.Text, dr.RawBytes, detResult.Points, zxinggo.FormatDataMatrix)
-	result.PutMetadata(zxinggo.MetadataSymbologyIdentifier, "]d1")
+	result.PutMetadata(zxinggo.MetadataSymbologyIdentifier, fmt.Sprintf("]d%d", dr.SymbologyModifier))
+	result.PutMetadata(zxinggo.MetadataErrorsCorrected, dr.ErrorsCorrected)
 	return result, nil
 }
 
