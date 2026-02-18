@@ -1,5 +1,33 @@
 package charset
 
+import (
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
+)
+
+// DecodeBytes converts bytes from the given encoding to UTF-8.
+// Returns the original bytes if the encoding is already UTF-8/ASCII/ISO-8859-1
+// or if conversion fails.
+func DecodeBytes(data []byte, encoding string) string {
+	switch encoding {
+	case "Shift_JIS", "SJIS":
+		decoded, _, err := transform.Bytes(japanese.ShiftJIS.NewDecoder(), data)
+		if err == nil {
+			return string(decoded)
+		}
+		return string(data)
+	case "GB18030", "GB2312", "GBK", "EUC_CN":
+		decoded, _, err := transform.Bytes(simplifiedchinese.GB18030.NewDecoder(), data)
+		if err == nil {
+			return string(decoded)
+		}
+		return string(data)
+	default:
+		return string(data)
+	}
+}
+
 // GuessEncoding attempts to guess the encoding of a byte sequence.
 // Returns "SJIS", "UTF8", "ISO8859_1", or a fallback.
 func GuessEncoding(bytes []byte, characterSet string) string {

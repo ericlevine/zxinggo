@@ -27,6 +27,12 @@ func NewHybrid(source zxinggo.LuminanceSource) *Hybrid {
 	}
 }
 
+// CreateBinarizer creates a new Hybrid binarizer with the given source.
+// This implements the BinarizerFactory interface to support image rotation.
+func (h *Hybrid) CreateBinarizer(source zxinggo.LuminanceSource) zxinggo.Binarizer {
+	return NewHybrid(source)
+}
+
 // BlackMatrix returns the binarized matrix using local thresholding.
 func (h *Hybrid) BlackMatrix() (*bitutil.BitMatrix, error) {
 	if h.matrix != nil {

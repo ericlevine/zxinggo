@@ -15,6 +15,8 @@ type ImageLuminanceSource struct {
 
 // NewImageLuminanceSource creates a LuminanceSource from a Go image.Image.
 // The image is converted to greyscale luminance values upon construction.
+// Uses the same luminance formula as Java ZXing's BufferedImageLuminanceSource:
+// (306*R + 601*G + 117*B + 0x200) >> 10, operating on 8-bit color components.
 func NewImageLuminanceSource(img image.Image) *ImageLuminanceSource {
 	bounds := img.Bounds()
 	w := bounds.Dx()
@@ -24,11 +26,20 @@ func NewImageLuminanceSource(img image.Image) *ImageLuminanceSource {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			c := img.At(bounds.Min.X+x, bounds.Min.Y+y)
-			r, g, b, _ := c.RGBA()
-			// Use standard luminance formula: 0.299R + 0.587G + 0.114B
-			// The RGBA values are pre-multiplied 16-bit; shift down.
-			lum := (299*r + 587*g + 114*b) / 1000
-			luminances[y*w+x] = byte(lum >> 8)
+			_, _, _, a := c.RGBA()
+			if a == 0 {
+				// Fully-transparent pixels are forced to white, matching Java behavior.
+				luminances[y*w+x] = 0xFF
+			} else {
+				r, g, b, _ := c.RGBA()
+				// Convert 16-bit premultiplied RGBA to 8-bit per component.
+				// For opaque pixels (a=0xFFFF), r>>8 gives the 8-bit value.
+				// Use Java's exact formula: (306*R + 601*G + 117*B + 0x200) >> 10
+				r8 := r >> 8
+				g8 := g >> 8
+				b8 := b >> 8
+				luminances[y*w+x] = byte((306*r8 + 601*g8 + 117*b8 + 0x200) >> 10)
+			}
 		}
 	}
 
@@ -98,6 +109,26 @@ func (s *ImageLuminanceSource) Width() int {
 // Height returns the height of the image.
 func (s *ImageLuminanceSource) Height() int {
 	return s.height
+}
+
+// RotateCounterClockwise returns a new ImageLuminanceSource rotated 90 degrees
+// counterclockwise. This is used by 1D readers to try reading barcodes that
+// may be oriented vertically.
+func (s *ImageLuminanceSource) RotateCounterClockwise() *ImageLuminanceSource {
+	newWidth := s.height
+	newHeight := s.width
+	newLum := make([]byte, newWidth*newHeight)
+	for y := 0; y < s.height; y++ {
+		for x := 0; x < s.width; x++ {
+			// (x, y) in old image -> (y, width - 1 - x) in new image
+			newLum[(s.width-1-x)*newWidth+y] = s.luminances[y*s.width+x]
+		}
+	}
+	return &ImageLuminanceSource{
+		luminances: newLum,
+		width:      newWidth,
+		height:     newHeight,
+	}
 }
 
 // BitMatrixToImage converts a BitMatrix to a grayscale image where black

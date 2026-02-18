@@ -209,3 +209,33 @@ func (b *BinaryBitmap) BlackMatrix() (*bitutil.BitMatrix, error) {
 	b.matrix = m
 	return m, nil
 }
+
+// RotateCounterClockwise returns a new BinaryBitmap rotated 90 degrees CCW.
+// The underlying LuminanceSource must be an *ImageLuminanceSource.
+// Returns nil if rotation is not supported.
+func (b *BinaryBitmap) RotateCounterClockwise() *BinaryBitmap {
+	source := b.binarizer.LuminanceSource()
+	imgSource, ok := source.(*ImageLuminanceSource)
+	if !ok {
+		return nil
+	}
+	rotatedSource := imgSource.RotateCounterClockwise()
+	return NewBinaryBitmap(NewBinarizerFromSource(b.binarizer, rotatedSource))
+}
+
+// NewBinarizerFromSource creates a new binarizer of the same type with a new source.
+// This is a factory method to support rotation.
+func NewBinarizerFromSource(template Binarizer, source LuminanceSource) Binarizer {
+	// Use the BinarizerFactory if registered, otherwise fall back
+	if factory, ok := template.(BinarizerFactory); ok {
+		return factory.CreateBinarizer(source)
+	}
+	// Default: cannot create
+	return nil
+}
+
+// BinarizerFactory is an interface for binarizers that can create new instances
+// with a different LuminanceSource.
+type BinarizerFactory interface {
+	CreateBinarizer(source LuminanceSource) Binarizer
+}
