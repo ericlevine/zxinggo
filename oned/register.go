@@ -15,6 +15,8 @@ func init() {
 	zxinggo.RegisterReader(zxinggo.FormatUPCE, oneDReaderFactory)
 	zxinggo.RegisterReader(zxinggo.FormatITF, oneDReaderFactory)
 	zxinggo.RegisterReader(zxinggo.FormatCodabar, oneDReaderFactory)
+	zxinggo.RegisterReader(zxinggo.FormatRSS14, oneDReaderFactory)
+	zxinggo.RegisterReader(zxinggo.FormatRSSExpanded, oneDReaderFactory)
 
 	// Register writers
 	zxinggo.RegisterWriter(zxinggo.FormatCode128, func() zxinggo.Writer { return NewCode128Writer() })

@@ -37,6 +37,12 @@ func NewMultiFormatOneDReader(opts *zxinggo.DecodeOptions) *MultiFormatOneDReade
 		if formats[zxinggo.FormatCodabar] {
 			readers = append(readers, NewCodabarReader())
 		}
+		if formats[zxinggo.FormatRSS14] {
+			readers = append(readers, NewRSS14Reader())
+		}
+		if formats[zxinggo.FormatRSSExpanded] {
+			readers = append(readers, NewRSSExpandedReader())
+		}
 	}
 
 	if len(readers) == 0 {
@@ -49,6 +55,8 @@ func NewMultiFormatOneDReader(opts *zxinggo.DecodeOptions) *MultiFormatOneDReade
 			NewCode128Reader(),
 			NewITFReader(),
 			NewCodabarReader(),
+			NewRSS14Reader(),
+			NewRSSExpandedReader(),
 		}
 	}
 

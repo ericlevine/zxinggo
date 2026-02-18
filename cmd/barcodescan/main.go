@@ -15,6 +15,7 @@ import (
 	// Register all format readers.
 	_ "github.com/ericlevine/zxinggo/aztec"
 	_ "github.com/ericlevine/zxinggo/datamatrix"
+	_ "github.com/ericlevine/zxinggo/maxicode"
 	_ "github.com/ericlevine/zxinggo/oned"
 	_ "github.com/ericlevine/zxinggo/pdf417"
 	_ "github.com/ericlevine/zxinggo/qrcode"
@@ -73,6 +74,9 @@ var allFormats = []zxinggo.Format{
 	zxinggo.FormatCodabar,
 	zxinggo.FormatDataMatrix,
 	zxinggo.FormatAztec,
+	zxinggo.FormatRSS14,
+	zxinggo.FormatRSSExpanded,
+	zxinggo.FormatMaxiCode,
 }
 
 func scanFile(path string, tryHarder, pure bool) ([]*zxinggo.Result, error) {

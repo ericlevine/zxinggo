@@ -24,6 +24,9 @@ const (
 	FormatCodabar
 	FormatDataMatrix
 	FormatAztec
+	FormatRSS14
+	FormatRSSExpanded
+	FormatMaxiCode
 )
 
 // String returns the name of the barcode format.
@@ -53,6 +56,12 @@ func (f Format) String() string {
 		return "DATA_MATRIX"
 	case FormatAztec:
 		return "AZTEC"
+	case FormatRSS14:
+		return "RSS_14"
+	case FormatRSSExpanded:
+		return "RSS_EXPANDED"
+	case FormatMaxiCode:
+		return "MAXICODE"
 	default:
 		return "UNKNOWN"
 	}
