@@ -9,11 +9,14 @@ import (
 	_ "image/png"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	zxinggo "github.com/ericlevine/zxinggo"
 	"github.com/ericlevine/zxinggo/binarizer"
+	"github.com/ericlevine/zxinggo/pdf417"
 )
 
 // blackboxTestDir is the path to the blackbox test resources (copied from Java ZXing).
@@ -33,6 +36,7 @@ type blackboxTestCase struct {
 	dir    string // subdirectory name under blackboxTestDir, e.g. "aztec-1"
 	format zxinggo.Format
 	tests  []blackboxTestRotation
+	opts   *zxinggo.DecodeOptions // optional extra decode options
 }
 
 // rotateImage rotates an image by the given degrees (must be a multiple of 90).
@@ -289,7 +293,7 @@ func runBlackBoxTest(t *testing.T, tc blackboxTestCase) {
 			// Normal decode (no TryHarder)
 			source := zxinggo.NewImageLuminanceSource(rotated)
 			bitmap := zxinggo.NewBinaryBitmap(binarizer.NewHybrid(source))
-			result := tryDecode(bitmap, tc.format, false)
+			result := tryDecode(bitmap, tc.format, false, tc.opts)
 			outcome := classifyResult(result, tc.format, td.expectedText, td.metadata)
 			switch outcome {
 			case resultPassed:
@@ -306,7 +310,7 @@ func runBlackBoxTest(t *testing.T, tc blackboxTestCase) {
 			// TryHarder decode
 			source2 := zxinggo.NewImageLuminanceSource(rotated)
 			bitmap2 := zxinggo.NewBinaryBitmap(binarizer.NewHybrid(source2))
-			result2 := tryDecode(bitmap2, tc.format, true)
+			result2 := tryDecode(bitmap2, tc.format, true, tc.opts)
 			outcome2 := classifyResult(result2, tc.format, td.expectedText, td.metadata)
 			switch outcome2 {
 			case resultPassed:
@@ -401,7 +405,7 @@ func classifyResult(result *zxinggo.Result, format zxinggo.Format, expectedText 
 
 // tryDecode attempts to decode a barcode, trying PureBarcode first then normal.
 // Recovers from panics in decoders to prevent one bad image from crashing the entire test.
-func tryDecode(bitmap *zxinggo.BinaryBitmap, format zxinggo.Format, tryHarder bool) (result *zxinggo.Result) {
+func tryDecode(bitmap *zxinggo.BinaryBitmap, format zxinggo.Format, tryHarder bool, extraOpts *zxinggo.DecodeOptions) (result *zxinggo.Result) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = nil
@@ -412,6 +416,10 @@ func tryDecode(bitmap *zxinggo.BinaryBitmap, format zxinggo.Format, tryHarder bo
 		PossibleFormats: []zxinggo.Format{format},
 		TryHarder:       tryHarder,
 		PureBarcode:     true,
+	}
+	if extraOpts != nil {
+		opts.AlsoInverted = extraOpts.AlsoInverted
+		opts.AllowedEANExtensions = extraOpts.AllowedEANExtensions
 	}
 
 	// Try PureBarcode first (like Java)
@@ -424,6 +432,10 @@ func tryDecode(bitmap *zxinggo.BinaryBitmap, format zxinggo.Format, tryHarder bo
 	opts2 := &zxinggo.DecodeOptions{
 		PossibleFormats: []zxinggo.Format{format},
 		TryHarder:       tryHarder,
+	}
+	if extraOpts != nil {
+		opts2.AlsoInverted = extraOpts.AlsoInverted
+		opts2.AllowedEANExtensions = extraOpts.AllowedEANExtensions
 	}
 	result, err = zxinggo.Decode(bitmap, opts2)
 	if err == nil {
@@ -451,5 +463,159 @@ func rotM(degrees float64, mustPass, tryHarderPass, maxMisreads, maxTryHarderMis
 		maxMisreads:          maxMisreads,
 		maxTryHarderMisreads: maxTryHarderMisreads,
 	}
+}
+
+// runPDF417MultiTest runs a Macro PDF417 multi-symbol test.
+// Images are grouped by base name (e.g., 01-01.png, 01-02.png -> group "01").
+// Each group's images are decoded separately, results sorted by segment index,
+// then concatenated text is compared to the expected text.
+func runPDF417MultiTest(t *testing.T, dir string, mustPass int) {
+	t.Helper()
+
+	testDir := filepath.Join(blackboxTestDir, dir)
+	if _, err := os.Stat(testDir); os.IsNotExist(err) {
+		t.Skipf("test directory %s not found, skipping", testDir)
+		return
+	}
+
+	// Group image files by base name (before the dash)
+	entries, err := os.ReadDir(testDir)
+	if err != nil {
+		t.Fatalf("failed to read directory %s: %v", testDir, err)
+	}
+
+	type imageGroup struct {
+		baseName     string
+		expectedText string
+		imageFiles   []string
+	}
+
+	groupMap := make(map[string]*imageGroup)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		isImage := false
+		for _, ie := range imageExtensions {
+			if ext == ie {
+				isImage = true
+				break
+			}
+		}
+		if !isImage {
+			continue
+		}
+		// Extract base name: e.g., "01-01.png" -> "01"
+		base := name[:len(name)-len(ext)]
+		dashIdx := strings.Index(base, "-")
+		if dashIdx < 0 {
+			continue // not a multi-part image
+		}
+		groupName := base[:dashIdx]
+		g, ok := groupMap[groupName]
+		if !ok {
+			g = &imageGroup{baseName: groupName}
+			groupMap[groupName] = g
+		}
+		g.imageFiles = append(g.imageFiles, filepath.Join(testDir, name))
+	}
+
+	// Load expected text for each group
+	var groups []*imageGroup
+	for _, g := range groupMap {
+		text, err := loadExpectedText(filepath.Join(testDir, g.baseName))
+		if err != nil {
+			t.Logf("skipping group %s: %v", g.baseName, err)
+			continue
+		}
+		g.expectedText = text
+		groups = append(groups, g)
+	}
+
+	if len(groups) == 0 {
+		t.Fatalf("no valid test groups found in %s", testDir)
+	}
+
+	passed := 0
+	for _, g := range groups {
+		// Decode all images in the group
+		var allResults []*zxinggo.Result
+		for _, imgPath := range g.imageFiles {
+			f, err := os.Open(imgPath)
+			if err != nil {
+				t.Logf("failed to open %s: %v", imgPath, err)
+				continue
+			}
+			img, _, err := image.Decode(f)
+			f.Close()
+			if err != nil {
+				t.Logf("failed to decode image %s: %v", imgPath, err)
+				continue
+			}
+
+			source := zxinggo.NewImageLuminanceSource(img)
+			bitmap := zxinggo.NewBinaryBitmap(binarizer.NewHybrid(source))
+			opts := &zxinggo.DecodeOptions{
+				PossibleFormats: []zxinggo.Format{zxinggo.FormatPDF417},
+			}
+			results, err := pdf417.NewPDF417Reader().DecodeMultiple(bitmap, opts)
+			if err != nil {
+				continue
+			}
+			allResults = append(allResults, results...)
+		}
+
+		if len(allResults) == 0 {
+			t.Logf("group %s: no barcodes decoded", g.baseName)
+			continue
+		}
+
+		// Sort by segment index
+		sortPDF417ResultsBySegment(allResults)
+
+		// Concatenate text
+		var combined strings.Builder
+		for _, r := range allResults {
+			combined.WriteString(r.Text)
+		}
+
+		if combined.String() == g.expectedText {
+			passed++
+		} else {
+			t.Logf("group %s: text mismatch: got %q, want %q", g.baseName, combined.String(), g.expectedText)
+		}
+	}
+
+	t.Logf("PDF417 multi-symbol: %d/%d passed (need %d)", passed, len(groups), mustPass)
+	if passed < mustPass {
+		t.Errorf("too few groups passed: got %d, need %d", passed, mustPass)
+	}
+}
+
+func sortPDF417ResultsBySegment(results []*zxinggo.Result) {
+	sort.Slice(results, func(i, j int) bool {
+		return pdf417SegmentIndex(results[i]) < pdf417SegmentIndex(results[j])
+	})
+}
+
+func pdf417SegmentIndex(r *zxinggo.Result) int {
+	meta, ok := r.Metadata[zxinggo.MetadataPDF417ExtraMetadata]
+	if !ok {
+		return 0
+	}
+	// Use reflect to access SegmentIndex field on the concrete type
+	v := reflect.ValueOf(meta)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	if v.Kind() == reflect.Struct {
+		f := v.FieldByName("SegmentIndex")
+		if f.IsValid() {
+			return int(f.Int())
+		}
+	}
+	return 0
 }
 
