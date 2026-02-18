@@ -41,8 +41,10 @@ func (r *Reader) Decode(image *zxinggo.BinaryBitmap, opts *zxinggo.DecodeOptions
 		return nil, err
 	}
 
+	errorsCorrected := detResult.ErrorsCorrected + dr.ErrorsCorrected
 	result := zxinggo.NewResult(dr.Text, dr.RawBytes, detResult.Points, zxinggo.FormatAztec)
 	result.PutMetadata(zxinggo.MetadataSymbologyIdentifier, "]z0")
+	result.PutMetadata(zxinggo.MetadataErrorsCorrected, errorsCorrected)
 	return result, nil
 }
 

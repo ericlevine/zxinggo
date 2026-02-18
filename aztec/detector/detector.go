@@ -1,19 +1,12 @@
 // Package detector implements Aztec barcode detection in binary images.
-// This is a Go port of the ZXing Java Aztec detector
+// This is a faithful Go port of the ZXing Java Aztec detector
 // (com.google.zxing.aztec.detector.Detector).
-//
-// An Aztec code has a central bullseye finder pattern consisting of
-// concentric alternating black/white rings. The mode message is encoded
-// in a ring of modules just outside the bullseye. Data layers surround
-// the mode-message ring.
-//
-// Compact Aztec codes have a 5x5 bullseye (2 rings), 28-bit mode message.
-// Full-range Aztec codes have a 9x9 bullseye (3 rings), 40-bit mode message.
 package detector
 
 import (
 	"fmt"
 	"math"
+	"math/bits"
 
 	zxinggo "github.com/ericlevine/zxinggo"
 	"github.com/ericlevine/zxinggo/bitutil"
@@ -21,687 +14,529 @@ import (
 	"github.com/ericlevine/zxinggo/transform"
 )
 
-// DetectorResult encapsulates the result of detecting an Aztec barcode: the
-// sampled bit matrix, corner points, whether the code is compact, and the
-// number of data blocks and layers.
+// DetectorResult encapsulates the result of detecting an Aztec barcode.
 type DetectorResult struct {
-	Bits         *bitutil.BitMatrix
-	Points       []zxinggo.ResultPoint
-	Compact      bool
-	NbDataBlocks int
-	NbLayers     int
+	Bits            *bitutil.BitMatrix
+	Points          []zxinggo.ResultPoint
+	Compact         bool
+	NbDataBlocks    int
+	NbLayers        int
+	ErrorsCorrected int
 }
 
-// EXPECTED_CORNER_BITS contains the expected bit patterns at the four corners
-// of the bullseye used for orientation detection. Index 0 is for compact
-// symbols, index 1 for full-range symbols.
-//
-// For compact (7x7 outer ring, 3-bit corners):
-//
-//	corner 0: 111 = 0x07
-//	corner 1: 010 = 0x02
-//	corner 2: 001 = 0x01
-//	corner 3: 100 = 0x04
-//
-// For full-range (11x11 outer ring, 5-bit corners):
-//
-//	corner 0: 11101 = 0x1D
-//	corner 1: 01001 = 0x09
-//	corner 2: 00101 = 0x05
-//	corner 3: 10011 = 0x13
-var expectedCornerBits = [2][4]int{
-	{0x07, 0x02, 0x01, 0x04}, // compact
-	{0x1D, 0x09, 0x05, 0x13}, // full-range
+// EXPECTED_CORNER_BITS for rotation detection.
+// Each entry is a 12-bit pattern formed by concatenating the 3-bit orientation
+// marks from each of the 4 sides.
+var expectedCornerBits = [4]int{
+	0xee0, // 07340  XXX .XX X.. ...
+	0x1dc, // 00734  ... XXX .XX X..
+	0x83b, // 04073  X.. ... XXX .XX
+	0x707, // 03407  .XX X.. ... XXX
+}
+
+// point is an integer coordinate point (matching Java Detector.Point).
+type point struct {
+	x, y int
+}
+
+func (p point) toResultPoint() zxinggo.ResultPoint {
+	return zxinggo.ResultPoint{X: float64(p.x), Y: float64(p.y)}
+}
+
+// correctedParameter holds the result of RS correction on parameter data.
+type correctedParameter struct {
+	data            int
+	errorsCorrected int
 }
 
 // Detect locates an Aztec barcode in the given binary image and returns the
-// detection result containing the sampled bit matrix, corner points, and
-// symbol parameters (compact, nbDataBlocks, nbLayers).
-//
-// If isMirror is true, the detector expects a horizontally mirrored symbol.
+// detection result.
 func Detect(image *bitutil.BitMatrix, isMirror bool) (*DetectorResult, error) {
-	// Step 1: Find the center of the bullseye pattern.
-	pCenter, err := getMatrixCenter(image)
+	// 1. Get the center of the aztec matrix
+	pCenter := getMatrixCenter(image)
+
+	// 2. Get the center points of the four diagonal points just outside the bull's eye
+	//  [topRight, bottomRight, bottomLeft, topLeft]
+	bullsEyeCorners, compact, nbCenterLayers, err := getBullsEyeCorners(image, pCenter)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 2: Get the four corners of the bullseye and determine whether
-	// the symbol is compact or full-range.
-	bullseyeCorners, compact, err := getBullseyeCorners(image, pCenter)
+	if isMirror {
+		bullsEyeCorners[0], bullsEyeCorners[2] = bullsEyeCorners[2], bullsEyeCorners[0]
+	}
+
+	// 3. Get the size of the matrix and other parameters from the bull's eye
+	nbDataBlocks, nbLayers, shift, errorsCorrected, err := extractParameters(image, bullsEyeCorners, compact, nbCenterLayers)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: Read the orientation marks and extract the mode message
-	// (nbDataBlocks and nbLayers).
-	nbDataBlocks, nbLayers, shift, err := extractParameters(image, bullseyeCorners, compact, isMirror)
+	// 4. Sample the grid
+	sampled, err := sampleGrid(image,
+		bullsEyeCorners[shift%4],
+		bullsEyeCorners[(shift+1)%4],
+		bullsEyeCorners[(shift+2)%4],
+		bullsEyeCorners[(shift+3)%4],
+		compact, nbLayers, nbCenterLayers)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 4: Sample the grid to extract the full symbol.
-	bits, corners, err := sampleGrid(image, bullseyeCorners[0], bullseyeCorners[1],
-		bullseyeCorners[2], bullseyeCorners[3], compact, nbLayers, shift)
-	if err != nil {
-		return nil, err
-	}
+	// 5. Get the corners of the matrix.
+	corners := getMatrixCornerPoints(bullsEyeCorners, nbCenterLayers, compact, nbLayers)
 
 	return &DetectorResult{
-		Bits:         bits,
-		Points:       corners,
-		Compact:      compact,
-		NbDataBlocks: nbDataBlocks,
-		NbLayers:     nbLayers,
+		Bits:            sampled,
+		Points:          corners,
+		Compact:         compact,
+		NbDataBlocks:    nbDataBlocks,
+		NbLayers:        nbLayers,
+		ErrorsCorrected: errorsCorrected,
 	}, nil
 }
 
-// ---------------------------------------------------------------------------
-// Step 1: Find the center of the bullseye
-// ---------------------------------------------------------------------------
-
-// getMatrixCenter locates the approximate center of the Aztec bullseye.
-// It uses a WhiteRectangleDetector to find a black region, then refines
-// the center by tracing the ring-transition pattern along the cardinal axes.
-func getMatrixCenter(image *bitutil.BitMatrix) (zxinggo.ResultPoint, error) {
-	// Try the WhiteRectangleDetector first.
-	var cx, cy int
-	wrd, err := newWhiteRectangleDetector(image)
-	if err == nil {
-		corners, err2 := wrd.detect()
-		if err2 == nil {
-			cx = iround((corners[0].X + corners[1].X + corners[2].X + corners[3].X) / 4.0)
-			cy = iround((corners[0].Y + corners[1].Y + corners[2].Y + corners[3].Y) / 4.0)
-		} else {
-			cx = image.Width() / 2
-			cy = image.Height() / 2
-		}
-	} else {
-		cx = image.Width() / 2
-		cy = image.Height() / 2
+// extractParameters reads the mode message from the ring around the bull's eye.
+func extractParameters(image *bitutil.BitMatrix, bullsEyeCorners [4]zxinggo.ResultPoint, compact bool, nbCenterLayers int) (nbDataBlocks, nbLayers, shift, errorsCorrected int, err error) {
+	if !isValidRP(image, bullsEyeCorners[0]) || !isValidRP(image, bullsEyeCorners[1]) ||
+		!isValidRP(image, bullsEyeCorners[2]) || !isValidRP(image, bullsEyeCorners[3]) {
+		return 0, 0, 0, 0, zxinggo.ErrNotFound
+	}
+	length := 2 * nbCenterLayers
+	// Get the bits around the bull's eye
+	sides := [4]int{
+		sampleLine(image, bullsEyeCorners[0], bullsEyeCorners[1], length), // Right side
+		sampleLine(image, bullsEyeCorners[1], bullsEyeCorners[2], length), // Bottom
+		sampleLine(image, bullsEyeCorners[2], bullsEyeCorners[3], length), // Left side
+		sampleLine(image, bullsEyeCorners[3], bullsEyeCorners[0], length), // Top
 	}
 
-	// Refine center by tracing along the 4 cardinal directions.
-	// Repeat up to 3 times until convergence.
-	for i := 0; i < 3; i++ {
-		newCX := firstDifferentCol(image, cx, cy)
-		newCY := firstDifferentRow(image, cx, cy)
-		if newCX == cx && newCY == cy {
-			break
-		}
-		cx = newCX
-		cy = newCY
-	}
-
-	return zxinggo.ResultPoint{X: float64(cx), Y: float64(cy)}, nil
-}
-
-// firstDifferentCol refines the horizontal center by finding the midpoint
-// of the full horizontal run passing through (cx, cy) in the bullseye.
-func firstDifferentCol(image *bitutil.BitMatrix, cx, cy int) int {
-	w := image.Width()
-	color := image.Get(cx, cy)
-	left := cx
-	right := cx
-	for left > 0 && image.Get(left-1, cy) == color {
-		left--
-	}
-	for right < w-1 && image.Get(right+1, cy) == color {
-		right++
-	}
-	return (left + right) / 2
-}
-
-// firstDifferentRow refines the vertical center by finding the midpoint
-// of the full vertical run passing through (cx, cy) in the bullseye.
-func firstDifferentRow(image *bitutil.BitMatrix, cx, cy int) int {
-	h := image.Height()
-	color := image.Get(cx, cy)
-	up := cy
-	down := cy
-	for up > 0 && image.Get(cx, up-1) == color {
-		up--
-	}
-	for down < h-1 && image.Get(cx, down+1) == color {
-		down++
-	}
-	return (up + down) / 2
-}
-
-// ---------------------------------------------------------------------------
-// Step 2: Get the bullseye corners
-// ---------------------------------------------------------------------------
-
-// getBullseyeCorners finds the four corners of the outermost ring of the
-// bullseye. It traces outward from the center along each of the four
-// cardinal directions, counting black/white transitions. The transition
-// count determines compact vs full-range.
-//
-// Returns the four corner points (in order: NE, SE, SW, NW) and a boolean
-// indicating compact mode.
-func getBullseyeCorners(image *bitutil.BitMatrix, center zxinggo.ResultPoint) ([4]zxinggo.ResultPoint, bool, error) {
-	cx := iround(center.X)
-	cy := iround(center.Y)
-
-	// Count transitions in each of the four cardinal directions from center.
-	// We count transitions outward until we have crossed through the bullseye.
-	// For compact (5x5 bullseye): from center we see B(1),W(1),B(1) outward = 2 transitions per side.
-	// For full (7x7 bullseye): B(1),W(1),B(1),W(1) outward = 3 transitions per side.
-	// Including the outer mode-message area: compact ~4, full ~6 transitions per side.
-	//
-	// We trace up to 9 transitions on each side to be safe and then use the
-	// count to determine compact vs full.
-	rightDist, rightTrans := traceCardinal(image, cx, cy, 1, 0)
-	leftDist, leftTrans := traceCardinal(image, cx, cy, -1, 0)
-	downDist, downTrans := traceCardinal(image, cx, cy, 0, 1)
-	upDist, upTrans := traceCardinal(image, cx, cy, 0, -1)
-
-	// Average the transition counts from opposite directions.
-	avgH := (rightTrans + leftTrans + 1) / 2
-	avgV := (downTrans + upTrans + 1) / 2
-	avgTrans := (avgH + avgV + 1) / 2
-
-	// Compact bullseye (5x5): ~2 transitions per cardinal direction from center
-	// Full bullseye (7x7): ~3-4 transitions per cardinal direction from center
-	compact := avgTrans <= 3
-
-	// Determine the number of ring layers in the bullseye.
-	// Compact: 2 rings (5x5), half-width = 2 modules
-	// Full: 3 rings (7x7), half-width = 3 modules
-	var nbRings int
-	if compact {
-		nbRings = 2
-	} else {
-		nbRings = 3
-	}
-
-	// Estimate the bullseye extent in each cardinal direction.
-	// The bullseye spans nbRings modules from center in each direction.
-	// We use the measured pixel distances, but cap them based on the
-	// expected number of ring transitions.
-	halfPixRight := limitDist(rightDist, nbRings, rightTrans)
-	halfPixLeft := limitDist(leftDist, nbRings, leftTrans)
-	halfPixDown := limitDist(downDist, nbRings, downTrans)
-	halfPixUp := limitDist(upDist, nbRings, upTrans)
-
-	// Compute the four corner points as intersections of the axis extents.
-	corners := [4]zxinggo.ResultPoint{
-		{X: float64(cx) + halfPixRight, Y: float64(cy) - halfPixUp},   // NE
-		{X: float64(cx) + halfPixRight, Y: float64(cy) + halfPixDown}, // SE
-		{X: float64(cx) - halfPixLeft, Y: float64(cy) + halfPixDown},  // SW
-		{X: float64(cx) - halfPixLeft, Y: float64(cy) - halfPixUp},    // NW
-	}
-
-	return corners, compact, nil
-}
-
-// traceCardinal traces from (cx,cy) in direction (dx,dy) and returns the
-// pixel distance reached and the number of color transitions found. Tracing
-// stops at the image boundary or after reaching a sufficient extent.
-func traceCardinal(image *bitutil.BitMatrix, cx, cy, dx, dy int) (distPixels, transitions int) {
-	w := image.Width()
-	h := image.Height()
-	x := cx + dx
-	y := cy + dy
-
-	if x < 0 || x >= w || y < 0 || y >= h {
-		return 0, 0
-	}
-
-	currentColor := image.Get(cx, cy)
-	lastTransDist := 0
-
-	for x >= 0 && x < w && y >= 0 && y < h {
-		distPixels++
-		if image.Get(x, y) != currentColor {
-			transitions++
-			currentColor = !currentColor
-			lastTransDist = distPixels
-			// Stop after enough transitions for even the largest bullseye.
-			if transitions >= 9 {
-				break
-			}
-		}
-		x += dx
-		y += dy
-	}
-	// Return the distance to the last transition rather than to the edge.
-	if lastTransDist > 0 {
-		distPixels = lastTransDist
-	}
-	return distPixels, transitions
-}
-
-// limitDist estimates the pixel half-width of the bullseye in one cardinal
-// direction by scaling the measured distance based on the ratio of expected
-// rings to observed transitions.
-func limitDist(measuredDist, nbRings, measuredTrans int) float64 {
-	if measuredTrans <= 0 {
-		return float64(measuredDist)
-	}
-	// The bullseye has nbRings transitions from center to outer edge.
-	// Scale the measured distance proportionally.
-	ratio := float64(nbRings) / float64(measuredTrans)
-	if ratio > 1.0 {
-		ratio = 1.0
-	}
-	return float64(measuredDist) * ratio
-}
-
-// ---------------------------------------------------------------------------
-// Step 3: Extract parameters from the mode message
-// ---------------------------------------------------------------------------
-
-// extractParameters reads the orientation marks at the four corners of the
-// bullseye to determine rotation, then reads and error-corrects the mode
-// message to extract nbDataBlocks and nbLayers.
-func extractParameters(image *bitutil.BitMatrix, corners [4]zxinggo.ResultPoint, compact, isMirror bool) (nbDataBlocks, nbLayers, shift int, err error) {
-	// Determine rotation.
-	shift, err = getRotation(image, corners, compact)
+	shift, err = getRotation(sides, length)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 
-	// Read the mode message bits from the ring outside the bullseye.
-	modeMsgBits, err := readModeMessage(image, corners, compact, isMirror, shift)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
-	// Reed-Solomon error correction on the mode message using GF(16).
-	var numCodewords int
-	var numECCodewords int
-	if compact {
-		numCodewords = 7   // 28 bits / 4 bits per word
-		numECCodewords = 5 // 7 total - 2 data = 5 EC
-	} else {
-		numCodewords = 10  // 40 bits / 4 bits per word
-		numECCodewords = 6 // 10 total - 4 data = 6 EC
-	}
-
-	// Convert mode message bits to 4-bit codewords.
-	words := make([]int, numCodewords)
-	for i := 0; i < numCodewords; i++ {
-		word := 0
-		for bit := 0; bit < 4; bit++ {
-			idx := i*4 + bit
-			if idx < len(modeMsgBits) && modeMsgBits[idx] {
-				word |= 1 << uint(3-bit)
-			}
-		}
-		words[i] = word
-	}
-
-	rsDecoder := reedsolomon.NewDecoder(reedsolomon.AztecParam)
-	_, err = rsDecoder.Decode(words, numECCodewords)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("aztec detector: mode message RS correction failed: %w", err)
-	}
-
-	// Extract parameters from corrected data words.
-	if compact {
-		// 2 data words = 8 data bits.
-		// bits[0:2]  -> nbLayers - 1
-		// bits[2:8]  -> nbDataBlocks - 1
-		val := (words[0] << 4) | words[1]
-		nbLayers = ((val >> 6) & 0x03) + 1
-		nbDataBlocks = (val & 0x3F) + 1
-	} else {
-		// 4 data words = 16 data bits.
-		// bits[0:5]  -> nbLayers - 1
-		// bits[5:16] -> nbDataBlocks - 1
-		val := (words[0] << 12) | (words[1] << 8) | (words[2] << 4) | words[3]
-		nbLayers = ((val >> 11) & 0x1F) + 1
-		nbDataBlocks = (val & 0x07FF) + 1
-	}
-
-	return nbDataBlocks, nbLayers, shift, nil
-}
-
-// getRotation determines the rotation of the symbol (0, 1, 2, or 3
-// quarter-turns) by reading the orientation marks at the four corners of
-// the bullseye and matching them against the expected patterns.
-func getRotation(image *bitutil.BitMatrix, corners [4]zxinggo.ResultPoint, compact bool) (int, error) {
-	// Read the orientation bit pattern at each corner.
-	var cornerBitLen int
-	if compact {
-		cornerBitLen = 3
-	} else {
-		cornerBitLen = 5
-	}
-
-	cornerBits := [4]int{}
+	// Flatten the parameter bits into a single 28- or 40-bit long
+	var parameterData int64
 	for i := 0; i < 4; i++ {
-		cornerBits[i] = readCornerBits(image, corners, i, cornerBitLen)
+		side := sides[(shift+i)%4]
+		if compact {
+			// Each side of the form ..XXXXXXX. where Xs are parameter data
+			parameterData <<= 7
+			parameterData += int64((side >> 1) & 0x7F)
+		} else {
+			// Each side of the form ..XXXXX.XXXXX. where Xs are parameter data
+			parameterData <<= 10
+			parameterData += int64(((side >> 2) & (0x1f << 5)) + ((side >> 1) & 0x1F))
+		}
 	}
 
-	// Determine which expected pattern set to use.
-	var expectedIdx int
+	// Corrects parameter data using RS
+	corrected, err := getCorrectedParameterData(parameterData, compact)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	correctedData := corrected.data
+
 	if compact {
-		expectedIdx = 0
+		// 8 bits: 2 bits layers and 6 bits data blocks
+		nbLayers = (correctedData >> 6) + 1
+		nbDataBlocks = (correctedData & 0x3F) + 1
 	} else {
-		expectedIdx = 1
+		// 16 bits: 5 bits layers and 11 bits data blocks
+		nbLayers = (correctedData >> 11) + 1
+		nbDataBlocks = (correctedData & 0x7FF) + 1
 	}
-	expected := expectedCornerBits[expectedIdx]
 
-	// Try each of the 4 rotations.
-	bestShift := 0
-	bestScore := -1
+	return nbDataBlocks, nbLayers, shift, corrected.errorsCorrected, nil
+}
+
+// getRotation determines the rotation shift from orientation marks.
+func getRotation(sides [4]int, length int) (int, error) {
+	// Grab the 3 bits from each of the sides that form the locator pattern
+	// and concatenate into a 12-bit integer.
+	cornerBits := 0
+	for _, side := range sides {
+		// XX......X where X's are orientation marks
+		t := ((side >> (length - 2)) << 1) + (side & 1)
+		cornerBits = (cornerBits << 3) + t
+	}
+	// Move the bottom bit to the top, so that the three bits of the locator
+	// pattern at A are together.
+	cornerBits = ((cornerBits & 1) << 11) + (cornerBits >> 1)
+
 	for shift := 0; shift < 4; shift++ {
-		score := 0
-		for i := 0; i < 4; i++ {
-			rotIdx := (i + shift) % 4
-			if cornerBits[rotIdx] == expected[i] {
-				score++
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			bestShift = shift
-		}
-		if score == 4 {
+		if bits.OnesCount(uint(cornerBits^expectedCornerBits[shift])) <= 2 {
 			return shift, nil
 		}
 	}
-
-	// Accept the best match even if not perfect (may have noise).
-	if bestScore >= 2 {
-		return bestShift, nil
-	}
-
-	return 0, fmt.Errorf("aztec detector: rotation not found (best score %d)", bestScore)
+	return 0, zxinggo.ErrNotFound
 }
 
-// readCornerBits reads the orientation bit pattern at the given corner of
-// the bullseye's outer ring.
-//
-// Corner indices: 0=NE (top-right), 1=SE (bottom-right), 2=SW (bottom-left),
-// 3=NW (top-left).
-//
-// The bits at each corner are read from the modules along the outer edge
-// of the bullseye. For a compact symbol, these are 3 bits; for full-range,
-// 5 bits.
-func readCornerBits(image *bitutil.BitMatrix, corners [4]zxinggo.ResultPoint, cornerIdx, bitLen int) int {
-	cx := iround(corners[cornerIdx].X)
-	cy := iround(corners[cornerIdx].Y)
-	w := image.Width()
-	h := image.Height()
-
-	val := 0
-
-	// At each corner we read bitLen bits. The reading direction depends
-	// on which corner:
-	// NE (0): along the top edge from left to right (horizontal)
-	// SE (1): along the right edge from top to bottom (vertical)
-	// SW (2): along the bottom edge from right to left (horizontal, reversed)
-	// NW (3): along the left edge from bottom to top (vertical, reversed)
-	switch cornerIdx {
-	case 0: // NE corner: read horizontally (left to right)
-		for i := 0; i < bitLen; i++ {
-			px := cx - bitLen/2 + i
-			py := cy
-			if px >= 0 && px < w && py >= 0 && py < h && image.Get(px, py) {
-				val |= 1 << uint(bitLen-1-i)
-			}
-		}
-	case 1: // SE corner: read vertically (top to bottom)
-		for i := 0; i < bitLen; i++ {
-			px := cx
-			py := cy - bitLen/2 + i
-			if px >= 0 && px < w && py >= 0 && py < h && image.Get(px, py) {
-				val |= 1 << uint(bitLen-1-i)
-			}
-		}
-	case 2: // SW corner: read horizontally (right to left)
-		for i := 0; i < bitLen; i++ {
-			px := cx + bitLen/2 - i
-			py := cy
-			if px >= 0 && px < w && py >= 0 && py < h && image.Get(px, py) {
-				val |= 1 << uint(bitLen-1-i)
-			}
-		}
-	case 3: // NW corner: read vertically (bottom to top)
-		for i := 0; i < bitLen; i++ {
-			px := cx
-			py := cy + bitLen/2 - i
-			if px >= 0 && px < w && py >= 0 && py < h && image.Get(px, py) {
-				val |= 1 << uint(bitLen-1-i)
-			}
-		}
-	}
-	return val
-}
-
-// readModeMessage reads the mode message bits from the ring of modules just
-// outside the bullseye. The bits are read going clockwise starting from the
-// side determined by the rotation shift.
-//
-// Compact: 28 bits in a ring of 7 modules per side (4 sides * 7 = 28).
-// Full: 40 bits in a ring of 10 modules per side (4 sides * 10 = 40).
-func readModeMessage(image *bitutil.BitMatrix, corners [4]zxinggo.ResultPoint, compact, isMirror bool, shift int) ([]bool, error) {
-	var sideLen int
-	var totalBits int
+// getCorrectedParameterData corrects parameter data using Reed-Solomon.
+func getCorrectedParameterData(parameterData int64, compact bool) (*correctedParameter, error) {
+	var numCodewords, numDataCodewords int
 	if compact {
-		sideLen = 7
-		totalBits = 28
+		numCodewords = 7
+		numDataCodewords = 2
 	} else {
-		sideLen = 10
-		totalBits = 40
+		numCodewords = 10
+		numDataCodewords = 4
 	}
 
-	// The mode message ring is located 1 module outside the bullseye outer ring.
-	// We sample along each of the 4 sides of this ring.
-	//
-	// Side ordering (clockwise, unrotated):
-	//   side 0 = top:    from NW corner toward NE corner
-	//   side 1 = right:  from NE corner toward SE corner
-	//   side 2 = bottom: from SE corner toward SW corner
-	//   side 3 = left:   from SW corner toward NW corner
-	//
-	// Corners array: 0=NE, 1=SE, 2=SW, 3=NW
-
-	// Map each side to its start and end corner indices and the
-	// perpendicular outward offset direction.
-	type sideInfo struct {
-		startCorner int
-		endCorner   int
-		offX, offY  float64 // outward offset direction (unit)
+	numECCodewords := numCodewords - numDataCodewords
+	parameterWords := make([]int, numCodewords)
+	for i := numCodewords - 1; i >= 0; i-- {
+		parameterWords[i] = int(parameterData & 0xF)
+		parameterData >>= 4
 	}
 
-	sides := [4]sideInfo{
-		{startCorner: 3, endCorner: 0, offX: 0, offY: -1}, // top side
-		{startCorner: 0, endCorner: 1, offX: 1, offY: 0},  // right side
-		{startCorner: 1, endCorner: 2, offX: 0, offY: 1},  // bottom side
-		{startCorner: 2, endCorner: 3, offX: -1, offY: 0}, // left side
+	rsDecoder := reedsolomon.NewDecoder(reedsolomon.AztecParam)
+	errorsCorrected, err := rsDecoder.Decode(parameterWords, numECCodewords)
+	if err != nil {
+		return nil, zxinggo.ErrNotFound
 	}
 
-	// Estimate the module size from the bullseye corner distances.
-	centerX := (corners[0].X + corners[1].X + corners[2].X + corners[3].X) / 4.0
-	centerY := (corners[0].Y + corners[1].Y + corners[2].Y + corners[3].Y) / 4.0
-
-	// Distance from center to corners along an axis gives half the bullseye size.
-	halfSizeX := (math.Abs(corners[0].X-centerX) + math.Abs(corners[2].X-centerX)) / 2.0
-	halfSizeY := (math.Abs(corners[1].Y-centerY) + math.Abs(corners[3].Y-centerY)) / 2.0
-
-	var bullseyeHalf float64
-	if compact {
-		bullseyeHalf = 3.5 // compact bullseye outer ring is 7x7, half is 3.5
-	} else {
-		bullseyeHalf = 5.5 // full bullseye outer ring is 11x11, half is 5.5
+	// Toss the error correction. Just return the data as an integer
+	result := 0
+	for i := 0; i < numDataCodewords; i++ {
+		result = (result << 4) + parameterWords[i]
 	}
-
-	moduleX := halfSizeX / bullseyeHalf
-	moduleY := halfSizeY / bullseyeHalf
-	if moduleX <= 0 {
-		moduleX = 1
-	}
-	if moduleY <= 0 {
-		moduleY = 1
-	}
-
-	// The mode message ring is 1 module outside the bullseye.
-	// We offset sampling positions outward by moduleSize and then
-	// inward by half a module to hit module centers.
-	offsetDist := 1.5 // 1 module outside + 0.5 for center of that module
-
-	bits := make([]bool, totalBits)
-	bitIdx := 0
-
-	for side := 0; side < 4; side++ {
-		actualSide := (side + shift) % 4
-		si := sides[actualSide]
-
-		sx := corners[si.startCorner].X
-		sy := corners[si.startCorner].Y
-		ex := corners[si.endCorner].X
-		ey := corners[si.endCorner].Y
-
-		// Apply outward offset to both start and end points.
-		oX := si.offX * offsetDist * moduleX
-		oY := si.offY * offsetDist * moduleY
-		sx += oX
-		sy += oY
-		ex += oX
-		ey += oY
-
-		// Sample sideLen modules along this side.
-		for j := 0; j < sideLen; j++ {
-			t := (float64(j) + 0.5) / float64(sideLen)
-			px := iround(sx + t*(ex-sx))
-			py := iround(sy + t*(ey-sy))
-
-			w := image.Width()
-			h := image.Height()
-			if px >= 0 && px < w && py >= 0 && py < h {
-				if isMirror {
-					bits[totalBits-1-bitIdx] = image.Get(px, py)
-				} else {
-					bits[bitIdx] = image.Get(px, py)
-				}
-			}
-			bitIdx++
-		}
-	}
-
-	return bits, nil
+	return &correctedParameter{data: result, errorsCorrected: errorsCorrected}, nil
 }
 
-// ---------------------------------------------------------------------------
-// Step 4: Sample the grid
-// ---------------------------------------------------------------------------
+// getBullsEyeCorners finds the corners of the bull-eye centered on pCenter.
+// Returns [topRight, bottomRight, bottomLeft, topLeft].
+func getBullsEyeCorners(image *bitutil.BitMatrix, pCenter point) ([4]zxinggo.ResultPoint, bool, int, error) {
+	pina := pCenter
+	pinb := pCenter
+	pinc := pCenter
+	pind := pCenter
 
-// sampleGrid performs a perspective transform and samples the full Aztec
-// symbol grid.
-//
-// The four bullseye corner points define the coordinate system. We expand
-// them outward to encompass all data layers and use the perspective transform
-// to resample the image into a regular grid.
+	color := true
+
+	var nbCenterLayers int
+	for nbCenterLayers = 1; nbCenterLayers < 9; nbCenterLayers++ {
+		pouta := getFirstDifferent(image, pina, color, 1, -1)
+		poutb := getFirstDifferent(image, pinb, color, 1, 1)
+		poutc := getFirstDifferent(image, pinc, color, -1, 1)
+		poutd := getFirstDifferent(image, pind, color, -1, -1)
+
+		//d      a
+		//
+		//c      b
+
+		if nbCenterLayers > 2 {
+			q := distanceP(poutd, pouta) * float64(nbCenterLayers) / (distanceP(pind, pina) * float64(nbCenterLayers+2))
+			if q < 0.75 || q > 1.25 || !isWhiteOrBlackRectangle(image, pouta, poutb, poutc, poutd) {
+				break
+			}
+		}
+
+		pina = pouta
+		pinb = poutb
+		pinc = poutc
+		pind = poutd
+
+		color = !color
+	}
+
+	if nbCenterLayers != 5 && nbCenterLayers != 7 {
+		return [4]zxinggo.ResultPoint{}, false, 0, zxinggo.ErrNotFound
+	}
+
+	compact := nbCenterLayers == 5
+
+	// Expand the square by .5 pixel in each direction so that we're on the border
+	// between the white square and the black square
+	pinax := zxinggo.ResultPoint{X: float64(pina.x) + 0.5, Y: float64(pina.y) - 0.5}
+	pinbx := zxinggo.ResultPoint{X: float64(pinb.x) + 0.5, Y: float64(pinb.y) + 0.5}
+	pincx := zxinggo.ResultPoint{X: float64(pinc.x) - 0.5, Y: float64(pinc.y) + 0.5}
+	pindx := zxinggo.ResultPoint{X: float64(pind.x) - 0.5, Y: float64(pind.y) - 0.5}
+
+	// Expand the square so that its corners are the centers of the points
+	// just outside the bull's eye.
+	corners := expandSquare(
+		[4]zxinggo.ResultPoint{pinax, pinbx, pincx, pindx},
+		2*nbCenterLayers-3,
+		2*nbCenterLayers)
+
+	return corners, compact, nbCenterLayers, nil
+}
+
+// getMatrixCenter locates the approximate center of the Aztec bullseye.
+func getMatrixCenter(image *bitutil.BitMatrix) point {
+	var pointA, pointB, pointC, pointD zxinggo.ResultPoint
+
+	// Get a white rectangle that can be the border of the matrix in center bull's eye
+	wrd, err := newWhiteRectangleDetector(image)
+	if err == nil {
+		var cornerPoints []zxinggo.ResultPoint
+		cornerPoints, err = wrd.detect()
+		if err == nil {
+			pointA = cornerPoints[0]
+			pointB = cornerPoints[1]
+			pointC = cornerPoints[2]
+			pointD = cornerPoints[3]
+		}
+	}
+	if err != nil {
+		// This exception can be in case the initial rectangle is white
+		// In that case, surely in the bull's eye, we try to expand the rectangle.
+		cx := image.Width() / 2
+		cy := image.Height() / 2
+		pointA = getFirstDifferent(image, point{cx + 7, cy - 7}, false, 1, -1).toResultPoint()
+		pointB = getFirstDifferent(image, point{cx + 7, cy + 7}, false, 1, 1).toResultPoint()
+		pointC = getFirstDifferent(image, point{cx - 7, cy + 7}, false, -1, 1).toResultPoint()
+		pointD = getFirstDifferent(image, point{cx - 7, cy - 7}, false, -1, -1).toResultPoint()
+	}
+
+	// Compute the center of the rectangle
+	cx := mathRound((pointA.X + pointD.X + pointB.X + pointC.X) / 4.0)
+	cy := mathRound((pointA.Y + pointD.Y + pointB.Y + pointC.Y) / 4.0)
+
+	// Redetermine the white rectangle starting from previously computed center.
+	wrd2, err := newWhiteRectangleDetectorWithInit(image, 15, cx, cy)
+	if err == nil {
+		var cornerPoints []zxinggo.ResultPoint
+		cornerPoints, err = wrd2.detect()
+		if err == nil {
+			pointA = cornerPoints[0]
+			pointB = cornerPoints[1]
+			pointC = cornerPoints[2]
+			pointD = cornerPoints[3]
+		}
+	}
+	if err != nil {
+		// Fallback: try to expand the rectangle
+		pointA = getFirstDifferent(image, point{cx + 7, cy - 7}, false, 1, -1).toResultPoint()
+		pointB = getFirstDifferent(image, point{cx + 7, cy + 7}, false, 1, 1).toResultPoint()
+		pointC = getFirstDifferent(image, point{cx - 7, cy + 7}, false, -1, 1).toResultPoint()
+		pointD = getFirstDifferent(image, point{cx - 7, cy - 7}, false, -1, -1).toResultPoint()
+	}
+
+	// Recompute the center of the rectangle
+	cx = mathRound((pointA.X + pointD.X + pointB.X + pointC.X) / 4.0)
+	cy = mathRound((pointA.Y + pointD.Y + pointB.Y + pointC.Y) / 4.0)
+
+	return point{cx, cy}
+}
+
+// getMatrixCornerPoints gets the Aztec code corners from the bull's eye corners.
+func getMatrixCornerPoints(bullsEyeCorners [4]zxinggo.ResultPoint, nbCenterLayers int, compact bool, nbLayers int) []zxinggo.ResultPoint {
+	expanded := expandSquare(bullsEyeCorners, 2*nbCenterLayers, getDimension(compact, nbLayers))
+	return expanded[:]
+}
+
+// sampleGrid creates a BitMatrix by sampling the provided image.
 func sampleGrid(image *bitutil.BitMatrix,
-	cornerNE, cornerSE, cornerSW, cornerNW zxinggo.ResultPoint,
-	compact bool, nbLayers, shift int,
-) (*bitutil.BitMatrix, []zxinggo.ResultPoint, error) {
+	topLeft, topRight, bottomRight, bottomLeft zxinggo.ResultPoint,
+	compact bool, nbLayers, nbCenterLayers int) (*bitutil.BitMatrix, error) {
 
+	sampler := &transform.DefaultGridSampler{}
 	dimension := getDimension(compact, nbLayers)
-	if dimension <= 0 {
-		return nil, nil, fmt.Errorf("aztec detector: invalid dimension %d", dimension)
-	}
 
-	// The center of the symbol in image coordinates.
-	centerX := (cornerNE.X + cornerSE.X + cornerSW.X + cornerNW.X) / 4.0
-	centerY := (cornerNE.Y + cornerSE.Y + cornerSW.Y + cornerNW.Y) / 4.0
+	low := float64(dimension)/2.0 - float64(nbCenterLayers)
+	high := float64(dimension)/2.0 + float64(nbCenterLayers)
 
-	// The bullseye outer ring half-size in modules.
-	var bullseyeHalf float64
-	if compact {
-		bullseyeHalf = 3.5 // outer ring of compact bullseye is 7x7
-	} else {
-		bullseyeHalf = 5.5 // outer ring of full bullseye is 11x11
-	}
-
-	// Estimate module size from the bullseye corners.
-	avgDist := 0.0
-	for _, c := range []zxinggo.ResultPoint{cornerNE, cornerSE, cornerSW, cornerNW} {
-		dx := c.X - centerX
-		dy := c.Y - centerY
-		avgDist += math.Sqrt(dx*dx + dy*dy)
-	}
-	avgDist /= 4.0
-
-	// The bullseye corners are at a diagonal distance of bullseyeHalf * sqrt(2)
-	// from center.
-	moduleSize := avgDist / (bullseyeHalf * math.Sqrt2)
-	if moduleSize <= 0 {
-		return nil, nil, fmt.Errorf("aztec detector: invalid module size")
-	}
-
-	// Compute the four corners of the full symbol.
-	halfDim := float64(dimension) / 2.0
-	scaleFactor := halfDim * moduleSize / avgDist
-
-	topRight := zxinggo.ResultPoint{
-		X: centerX + (cornerNE.X-centerX)*scaleFactor,
-		Y: centerY + (cornerNE.Y-centerY)*scaleFactor,
-	}
-	bottomRight := zxinggo.ResultPoint{
-		X: centerX + (cornerSE.X-centerX)*scaleFactor,
-		Y: centerY + (cornerSE.Y-centerY)*scaleFactor,
-	}
-	bottomLeft := zxinggo.ResultPoint{
-		X: centerX + (cornerSW.X-centerX)*scaleFactor,
-		Y: centerY + (cornerSW.Y-centerY)*scaleFactor,
-	}
-	topLeft := zxinggo.ResultPoint{
-		X: centerX + (cornerNW.X-centerX)*scaleFactor,
-		Y: centerY + (cornerNW.Y-centerY)*scaleFactor,
-	}
-
-	// Build the perspective transform.
-	// Destination coordinates: the grid corners (with 0.5 offset for module centers).
-	dimF := float64(dimension)
-	xform := transform.QuadrilateralToQuadrilateral(
-		0.5, 0.5,
-		dimF-0.5, 0.5,
-		dimF-0.5, dimF-0.5,
-		0.5, dimF-0.5,
+	return sampler.SampleGrid(image,
+		dimension,
+		dimension,
+		low, low, // topleft
+		high, low, // topright
+		high, high, // bottomright
+		low, high, // bottomleft
 		topLeft.X, topLeft.Y,
 		topRight.X, topRight.Y,
 		bottomRight.X, bottomRight.Y,
-		bottomLeft.X, bottomLeft.Y,
-	)
-
-	sampler := &transform.DefaultGridSampler{}
-	bits, err := sampler.SampleGridTransform(image, dimension, dimension, xform)
-	if err != nil {
-		return nil, nil, fmt.Errorf("aztec detector: grid sampling failed: %w", err)
-	}
-
-	// Correct for symbol rotation. The data was sampled assuming rotation 0.
-	// If the symbol is rotated, we rotate the sampled grid accordingly.
-	if shift > 0 {
-		bits.Rotate(shift * 90)
-	}
-
-	return bits, []zxinggo.ResultPoint{topLeft, topRight, bottomRight, bottomLeft}, nil
+		bottomLeft.X, bottomLeft.Y)
 }
 
-// getDimension returns the side length (in modules) of the full Aztec symbol
-// including all data layers and any reference grid lines.
-//
-//	Compact: dimension = 4 * nbLayers + 11
-//	Full:    dimension = 4 * nbLayers + 14 + 2 * numRefGrids
-//
-// where numRefGrids = max(0, floor(((4*nbLayers+14)/2 - 13) / 15)).
-// The reference grid adds alignment lines every 16 modules from center.
+// sampleLine samples a line between two points.
+// p1 is inclusive, p2 is exclusive.
+// Returns the array of bits as an int (first bit is high-order bit of result).
+func sampleLine(image *bitutil.BitMatrix, p1, p2 zxinggo.ResultPoint, size int) int {
+	result := 0
+
+	d := distanceRP(p1, p2)
+	moduleSize := d / float64(size)
+	px := p1.X
+	py := p1.Y
+	dx := moduleSize * (p2.X - p1.X) / d
+	dy := moduleSize * (p2.Y - p1.Y) / d
+	for i := 0; i < size; i++ {
+		ix := mathRound(px + float64(i)*dx)
+		iy := mathRound(py + float64(i)*dy)
+		if ix >= 0 && ix < image.Width() && iy >= 0 && iy < image.Height() {
+			if image.Get(ix, iy) {
+				result |= 1 << uint(size-i-1)
+			}
+		}
+	}
+	return result
+}
+
+// isWhiteOrBlackRectangle checks if the border of the rectangle is all white or all black.
+func isWhiteOrBlackRectangle(image *bitutil.BitMatrix, p1, p2, p3, p4 point) bool {
+	corr := 3
+
+	p1 = point{
+		x: max(0, p1.x-corr),
+		y: min(image.Height()-1, p1.y+corr),
+	}
+	p2 = point{
+		x: max(0, p2.x-corr),
+		y: max(0, p2.y-corr),
+	}
+	p3 = point{
+		x: min(image.Width()-1, p3.x+corr),
+		y: max(0, min(image.Height()-1, p3.y-corr)),
+	}
+	p4 = point{
+		x: min(image.Width()-1, p4.x+corr),
+		y: min(image.Height()-1, p4.y+corr),
+	}
+
+	cInit := getColor(image, p4, p1)
+	if cInit == 0 {
+		return false
+	}
+
+	c := getColor(image, p1, p2)
+	if c != cInit {
+		return false
+	}
+
+	c = getColor(image, p2, p3)
+	if c != cInit {
+		return false
+	}
+
+	c = getColor(image, p3, p4)
+	return c == cInit
+}
+
+// getColor gets the color of a segment.
+// Returns 1 if segment more than 90% black, -1 if more than 90% white, 0 else.
+func getColor(image *bitutil.BitMatrix, p1, p2 point) int {
+	d := distanceP(p1, p2)
+	if d == 0.0 {
+		return 0
+	}
+	dx := float64(p2.x-p1.x) / d
+	dy := float64(p2.y-p1.y) / d
+	errorCount := 0
+
+	px := float64(p1.x)
+	py := float64(p1.y)
+
+	colorModel := image.Get(p1.x, p1.y)
+
+	iMax := int(math.Floor(d))
+	for i := 0; i < iMax; i++ {
+		ix := mathRound(px)
+		iy := mathRound(py)
+		if ix >= 0 && ix < image.Width() && iy >= 0 && iy < image.Height() {
+			if image.Get(ix, iy) != colorModel {
+				errorCount++
+			}
+		}
+		px += dx
+		py += dy
+	}
+
+	errRatio := float64(errorCount) / d
+
+	if errRatio > 0.1 && errRatio < 0.9 {
+		return 0
+	}
+
+	if (errRatio <= 0.1) == colorModel {
+		return 1
+	}
+	return -1
+}
+
+// getFirstDifferent gets the coordinate of the first point with a different color
+// in the given direction.
+func getFirstDifferent(image *bitutil.BitMatrix, init point, color bool, dx, dy int) point {
+	x := init.x + dx
+	y := init.y + dy
+
+	for isValid(image, x, y) && image.Get(x, y) == color {
+		x += dx
+		y += dy
+	}
+
+	x -= dx
+	y -= dy
+
+	for isValid(image, x, y) && image.Get(x, y) == color {
+		x += dx
+	}
+	x -= dx
+
+	for isValid(image, x, y) && image.Get(x, y) == color {
+		y += dy
+	}
+	y -= dy
+
+	return point{x, y}
+}
+
+// expandSquare expands the square by pushing out equally in all directions.
+func expandSquare(cornerPoints [4]zxinggo.ResultPoint, oldSide, newSide int) [4]zxinggo.ResultPoint {
+	ratio := float64(newSide) / (2.0 * float64(oldSide))
+	dx := cornerPoints[0].X - cornerPoints[2].X
+	dy := cornerPoints[0].Y - cornerPoints[2].Y
+	centerx := (cornerPoints[0].X + cornerPoints[2].X) / 2.0
+	centery := (cornerPoints[0].Y + cornerPoints[2].Y) / 2.0
+
+	result0 := zxinggo.ResultPoint{X: centerx + ratio*dx, Y: centery + ratio*dy}
+	result2 := zxinggo.ResultPoint{X: centerx - ratio*dx, Y: centery - ratio*dy}
+
+	dx = cornerPoints[1].X - cornerPoints[3].X
+	dy = cornerPoints[1].Y - cornerPoints[3].Y
+	centerx = (cornerPoints[1].X + cornerPoints[3].X) / 2.0
+	centery = (cornerPoints[1].Y + cornerPoints[3].Y) / 2.0
+	result1 := zxinggo.ResultPoint{X: centerx + ratio*dx, Y: centery + ratio*dy}
+	result3 := zxinggo.ResultPoint{X: centerx - ratio*dx, Y: centery - ratio*dy}
+
+	return [4]zxinggo.ResultPoint{result0, result1, result2, result3}
+}
+
+func isValid(image *bitutil.BitMatrix, x, y int) bool {
+	return x >= 0 && x < image.Width() && y >= 0 && y < image.Height()
+}
+
+func isValidRP(image *bitutil.BitMatrix, p zxinggo.ResultPoint) bool {
+	x := mathRound(p.X)
+	y := mathRound(p.Y)
+	return isValid(image, x, y)
+}
+
+func distanceP(a, b point) float64 {
+	dx := float64(a.x - b.x)
+	dy := float64(a.y - b.y)
+	return math.Sqrt(dx*dx + dy*dy)
+}
+
+func distanceRP(a, b zxinggo.ResultPoint) float64 {
+	dx := a.X - b.X
+	dy := a.Y - b.Y
+	return math.Sqrt(dx*dx + dy*dy)
+}
+
+// getDimension returns the dimension of the Aztec symbol.
 func getDimension(compact bool, nbLayers int) int {
 	if compact {
 		return 4*nbLayers + 11
 	}
-	d := 4*nbLayers + 14
-	numRefGrids := (d/2 - 13) / 15
-	if numRefGrids < 0 {
-		numRefGrids = 0
-	}
-	return d + 2*numRefGrids
+	return 4*nbLayers + 2*((2*nbLayers+6)/15) + 15
+}
+
+func mathRound(f float64) int {
+	return int(math.Round(f))
 }
 
 // ---------------------------------------------------------------------------
@@ -724,17 +559,18 @@ func newWhiteRectangleDetector(image *bitutil.BitMatrix) (*whiteRectangleDetecto
 	return newWhiteRectangleDetectorWithInit(image, wrdInitSize, image.Width()/2, image.Height()/2)
 }
 
-func newWhiteRectangleDetectorWithInit(image *bitutil.BitMatrix, halfInit, x, y int) (*whiteRectangleDetector, error) {
+func newWhiteRectangleDetectorWithInit(image *bitutil.BitMatrix, initSz, x, y int) (*whiteRectangleDetector, error) {
 	w := image.Width()
 	h := image.Height()
 
-	li := x - halfInit
-	ri := x + halfInit
-	ui := y - halfInit
-	di := y + halfInit
+	halfsize := initSz / 2
+	li := x - halfsize
+	ri := x + halfsize
+	ui := y - halfsize
+	di := y + halfsize
 
 	if ui < 0 || li < 0 || di >= h || ri >= w {
-		return nil, zxinggo.ErrNotFound
+		return nil, fmt.Errorf("aztec detector: white rectangle detector init out of bounds")
 	}
 	return &whiteRectangleDetector{
 		image: image, width: w, height: h,
@@ -839,7 +675,7 @@ func (d *whiteRectangleDetector) detect() ([]zxinggo.ResultPoint, error) {
 
 	var (
 		pA, pB, pC, pD zxinggo.ResultPoint
-		found          bool
+		found           bool
 	)
 
 	// Bottom-left area
@@ -925,6 +761,3 @@ func distanceInt(aX, aY, bX, bY int) float64 {
 	return math.Sqrt(dx*dx + dy*dy)
 }
 
-func iround(f float64) int {
-	return int(math.Round(f))
-}

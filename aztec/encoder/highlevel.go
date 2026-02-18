@@ -110,6 +110,14 @@ type modeSwitch struct {
 
 // getLatchSequence returns the sequence of codes to latch from one mode to
 // another. Each entry specifies the current mode and the code to emit.
+//
+// The latch codes for each mode are (from the Aztec standard):
+//
+//	UPPER: 28=LL, 29=ML, 30=DL, 31=BS
+//	LOWER: 28=AS(shift), 29=ML, 30=DL, 31=BS
+//	MIXED: 28=LL, 29=UL, 30=PL, 31=BS
+//	DIGIT: 14=UL, 15=AS(shift)
+//	PUNCT: 31=UL
 func getLatchSequence(from, to int) []modeSwitch {
 	if from == to {
 		return nil
@@ -124,29 +132,29 @@ func getLatchSequence(from, to int) []modeSwitch {
 		case modeDigit:
 			return []modeSwitch{{modeUpper, 30}} // DL
 		case modePunct:
-			return []modeSwitch{{modeUpper, 29}, {modeMixed, 28}} // ML, PL
+			return []modeSwitch{{modeUpper, 29}, {modeMixed, 30}} // ML, PL
 		}
 	case modeLower:
 		switch to {
 		case modeUpper:
-			return []modeSwitch{{modeLower, 29}, {modeMixed, 29}} // ML, UL
+			return []modeSwitch{{modeLower, 30}, {modeDigit, 14}} // DL, UL (9 bits, matching Java)
 		case modeMixed:
 			return []modeSwitch{{modeLower, 29}} // ML
 		case modeDigit:
 			return []modeSwitch{{modeLower, 30}} // DL
 		case modePunct:
-			return []modeSwitch{{modeLower, 29}, {modeMixed, 28}} // ML, PL
+			return []modeSwitch{{modeLower, 29}, {modeMixed, 30}} // ML, PL
 		}
 	case modeMixed:
 		switch to {
 		case modeUpper:
 			return []modeSwitch{{modeMixed, 29}} // UL
 		case modeLower:
-			return []modeSwitch{{modeMixed, 29}, {modeUpper, 28}} // UL, LL
+			return []modeSwitch{{modeMixed, 28}} // LL
 		case modeDigit:
 			return []modeSwitch{{modeMixed, 29}, {modeUpper, 30}} // UL, DL
 		case modePunct:
-			return []modeSwitch{{modeMixed, 28}} // PL
+			return []modeSwitch{{modeMixed, 30}} // PL
 		}
 	case modeDigit:
 		switch to {
@@ -157,7 +165,7 @@ func getLatchSequence(from, to int) []modeSwitch {
 		case modeMixed:
 			return []modeSwitch{{modeDigit, 14}, {modeUpper, 29}} // UL, ML
 		case modePunct:
-			return []modeSwitch{{modeDigit, 14}, {modeUpper, 29}, {modeMixed, 28}} // UL, ML, PL
+			return []modeSwitch{{modeDigit, 14}, {modeUpper, 29}, {modeMixed, 30}} // UL, ML, PL
 		}
 	case modePunct:
 		switch to {

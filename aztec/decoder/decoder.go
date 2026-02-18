@@ -13,10 +13,10 @@ package decoder
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	zxinggo "github.com/ericlevine/zxinggo"
 	"github.com/ericlevine/zxinggo/bitutil"
+	"github.com/ericlevine/zxinggo/charset"
 	"github.com/ericlevine/zxinggo/reedsolomon"
 )
 
@@ -37,44 +37,51 @@ type AztecDetectorResult struct {
 
 // DecoderResult holds the final decoded text and raw bytes.
 type DecoderResult struct {
-	Text     string
-	RawBytes []byte
+	Text            string
+	RawBytes        []byte
+	ErrorsCorrected int
 }
 
 // ---------------------------------------------------------------------------
-// Encoding-mode constants
+// Encoding-mode constants (matching Java ZXing's Table enum)
 // ---------------------------------------------------------------------------
 
 const (
-	modeUpper = iota
-	modeLower
-	modeMixed
-	modeDigit
-	modePunct
+	tableUpper  = iota
+	tableLower
+	tableMixed
+	tableDigit
+	tablePunct
+	tableBinary
 )
 
-// Character tables -- indexed by the codeword value inside each mode.
-var upperTable = [32]rune{
-	0, ' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
-	'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 0, 0, 0, 0,
+// String tables matching Java ZXing Decoder exactly.
+// CTRL_ prefixed entries are table-change commands:
+//   CTRL_XY where X = table initial (U/L/M/D/P/B), Y = S (shift) or L (latch)
+
+var upperTable = [32]string{
+	"CTRL_PS", " ", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P",
+	"Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "CTRL_LL", "CTRL_ML", "CTRL_DL", "CTRL_BS",
 }
 
-var lowerTable = [32]rune{
-	0, ' ', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
-	'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 0, 0, 0, 0,
+var lowerTable = [32]string{
+	"CTRL_PS", " ", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
+	"q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "CTRL_US", "CTRL_ML", "CTRL_DL", "CTRL_BS",
 }
 
-var mixedTable = [32]rune{
-	0, ' ', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07', '\b', '\t', '\n',
-	'\x0b', '\f', '\r', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f',
-	'@', '\\', '^', '_', '`', '|', '~', '\x7f', 0, 0, 0, 0,
+var mixedTable = [32]string{
+	"CTRL_PS", " ", "\x01", "\x02", "\x03", "\x04", "\x05", "\x06", "\x07", "\b", "\t", "\n",
+	"\x0b", "\f", "\r", "\x1b", "\x1c", "\x1d", "\x1e", "\x1f", "@", "\\", "^", "_",
+	"`", "|", "~", "\x7f", "CTRL_LL", "CTRL_UL", "CTRL_PL", "CTRL_BS",
 }
 
-// punctTable maps codeword values to strings. Matches Java ZXing PUNCT_TABLE.
-// Index 0 = FLG(n) handled specially. Index 31 = CTRL_UL handled specially.
 var punctTable = [32]string{
-	"", "\r", "\r\n", ". ", ", ", ": ", "!", "\"", "#", "$", "%", "&", "'", "(", ")",
-	"*", "+", ",", "-", ".", "/", ":", ";", "<", "=", ">", "?", "[", "]", "{", "}", "",
+	"FLG(n)", "\r", "\r\n", ". ", ", ", ": ", "!", "\"", "#", "$", "%", "&", "'", "(", ")",
+	"*", "+", ",", "-", ".", "/", ":", ";", "<", "=", ">", "?", "[", "]", "{", "}", "CTRL_UL",
+}
+
+var digitTable = [16]string{
+	"CTRL_PS", " ", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ",", ".", "CTRL_UL", "CTRL_US",
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +92,7 @@ var punctTable = [32]string{
 func Decode(detectorResult *AztecDetectorResult) (*DecoderResult, error) {
 	rawbits := extractBits(detectorResult)
 
-	correctedBits, err := correctBits(detectorResult, rawbits)
+	correctedBits, errorsCorrected, err := correctBits(detectorResult, rawbits)
 	if err != nil {
 		return nil, err
 	}
@@ -96,8 +103,9 @@ func Decode(detectorResult *AztecDetectorResult) (*DecoderResult, error) {
 	}
 
 	return &DecoderResult{
-		Text:     text,
-		RawBytes: rawBytes,
+		Text:            text,
+		RawBytes:        rawBytes,
+		ErrorsCorrected: errorsCorrected,
 	}, nil
 }
 
@@ -129,7 +137,8 @@ func totalBitsInLayer(layers int, compact bool) int {
 
 // correctBits applies Reed-Solomon error correction to the raw bit stream
 // and unstuffs the data codewords. Matches Java ZXing Decoder.correctBits.
-func correctBits(ddata *AztecDetectorResult, rawbits []bool) ([]bool, error) {
+// Returns corrected bits, number of errors corrected, and error.
+func correctBits(ddata *AztecDetectorResult, rawbits []bool) ([]bool, int, error) {
 	nbLayers := ddata.NbLayers
 	nbDataBlocks := ddata.NbDataBlocks
 
@@ -137,7 +146,7 @@ func correctBits(ddata *AztecDetectorResult, rawbits []bool) ([]bool, error) {
 	numCodewords := len(rawbits) / cwSize
 
 	if nbDataBlocks > numCodewords {
-		return nil, zxinggo.ErrFormat
+		return nil, 0, zxinggo.ErrFormat
 	}
 
 	offset := len(rawbits) % cwSize
@@ -169,13 +178,13 @@ func correctBits(ddata *AztecDetectorResult, rawbits []bool) ([]bool, error) {
 	case 12:
 		gf = reedsolomon.AztecData12
 	default:
-		return nil, zxinggo.ErrFormat
+		return nil, 0, zxinggo.ErrFormat
 	}
 
 	rsDecoder := reedsolomon.NewDecoder(gf)
-	_, err := rsDecoder.Decode(dataWords, numECCodewords)
+	errorsCorrected, err := rsDecoder.Decode(dataWords, numECCodewords)
 	if err != nil {
-		return nil, zxinggo.ErrChecksum
+		return nil, 0, zxinggo.ErrChecksum
 	}
 
 	// Unstuff the corrected data codewords.
@@ -188,7 +197,7 @@ func correctBits(ddata *AztecDetectorResult, rawbits []bool) ([]bool, error) {
 	for i := 0; i < numDataCodewords; i++ {
 		w := dataWords[i]
 		if w == 0 || w == mask {
-			return nil, zxinggo.ErrFormat
+			return nil, 0, zxinggo.ErrFormat
 		}
 		if w == 1 || w == mask-1 {
 			stuffedCount++
@@ -215,44 +224,201 @@ func correctBits(ddata *AztecDetectorResult, rawbits []bool) ([]bool, error) {
 		}
 	}
 
-	return correctedBits, nil
+	return correctedBits, errorsCorrected, nil
 }
 
 // ---------------------------------------------------------------------------
 // Bit stream decoding (Aztec multi-mode encoding)
 // ---------------------------------------------------------------------------
 
+// getTable returns the table constant for the given table initial character.
+// Matches Java ZXing Decoder.getTable exactly.
+func getTable(t byte) int {
+	switch t {
+	case 'L':
+		return tableLower
+	case 'P':
+		return tablePunct
+	case 'M':
+		return tableMixed
+	case 'D':
+		return tableDigit
+	case 'B':
+		return tableBinary
+	default: // 'U'
+		return tableUpper
+	}
+}
+
+// getCharacter returns the string entry for the given table and code.
+// Matches Java ZXing Decoder.getCharacter exactly.
+func getCharacter(table, code int) string {
+	switch table {
+	case tableUpper:
+		return upperTable[code]
+	case tableLower:
+		return lowerTable[code]
+	case tableMixed:
+		return mixedTable[code]
+	case tablePunct:
+		return punctTable[code]
+	case tableDigit:
+		return digitTable[code]
+	default:
+		return ""
+	}
+}
+
 // getEncodedData decodes the corrected data-bit stream into text using the
-// Aztec five-mode encoding scheme.
+// Aztec five-mode encoding scheme. This is a faithful port of Java ZXing
+// Decoder.getEncodedData, including the shiftTable/latchTable architecture,
+// byte accumulation buffer, and ISO-8859-1 default encoding.
 func getEncodedData(correctedBits []bool) (string, []byte, error) {
 	endIndex := len(correctedBits)
-	currentMode := modeUpper
-	index := 0
+	latchTable := tableUpper // table most recently latched to
+	shiftTable := tableUpper // table to use for the next read
 
 	var result strings.Builder
-	var rawBytes []byte
 
+	// Intermediary buffer of decoded bytes, decoded into a string and flushed
+	// when character encoding changes (ECI) or input ends.
+	var decodedBytes []byte
+	var encoding string // empty means ISO-8859-1 (default)
+
+	index := 0
 	for index < endIndex {
-		if currentMode == modeDigit {
-			index, currentMode = decodeDigit(&result, correctedBits, index, endIndex)
+		if shiftTable == tableBinary {
+			if endIndex-index < 5 {
+				break
+			}
+			length := readCodeJava(correctedBits, index, 5)
+			index += 5
+			if length == 0 {
+				if endIndex-index < 11 {
+					break
+				}
+				length = readCodeJava(correctedBits, index, 11) + 31
+				index += 11
+			}
+			for charCount := 0; charCount < length; charCount++ {
+				if endIndex-index < 8 {
+					index = endIndex // Force outer loop to exit
+					break
+				}
+				code := readCodeJava(correctedBits, index, 8)
+				decodedBytes = append(decodedBytes, byte(code))
+				index += 8
+			}
+			// Go back to whatever mode we had been in
+			shiftTable = latchTable
 		} else {
-			index, currentMode = decodeNonDigit(&result, correctedBits, index, endIndex, currentMode)
-		}
-		if index < 0 {
-			return "", nil, zxinggo.ErrFormat
+			size := 5
+			if shiftTable == tableDigit {
+				size = 4
+			}
+			if endIndex-index < size {
+				break
+			}
+			code := readCodeJava(correctedBits, index, size)
+			index += size
+			str := getCharacter(shiftTable, code)
+			if str == "FLG(n)" {
+				if endIndex-index < 3 {
+					break
+				}
+				n := readCodeJava(correctedBits, index, 3)
+				index += 3
+				// Flush bytes, FLG changes state
+				result.WriteString(encodeBytes(decodedBytes, encoding))
+				decodedBytes = decodedBytes[:0]
+				switch n {
+				case 0:
+					result.WriteByte(29) // FNC1 as ASCII 29
+				case 7:
+					return "", nil, zxinggo.ErrFormat // FLG(7) is reserved and illegal
+				default:
+					// ECI is decimal integer encoded as 1-6 codes in DIGIT mode
+					eci := 0
+					if endIndex-index < 4*n {
+						break
+					}
+					for n > 0 {
+						nextDigit := readCodeJava(correctedBits, index, 4)
+						index += 4
+						if nextDigit < 2 || nextDigit > 11 {
+							return "", nil, zxinggo.ErrFormat // Not a decimal digit
+						}
+						eci = eci*10 + (nextDigit - 2)
+						n--
+					}
+					eciObj, err := charset.GetECIByValue(eci)
+					if err != nil || eciObj == nil {
+						return "", nil, zxinggo.ErrFormat
+					}
+					encoding = eciObj.GoName
+				}
+				// Go back to whatever mode we had been in
+				shiftTable = latchTable
+			} else if len(str) > 5 && str[:5] == "CTRL_" {
+				// Table changes
+				// ISO/IEC 24778:2008 prescribes ending a shift sequence in the
+				// mode from which it was invoked. That's including when that mode
+				// is a shift.
+				latchTable = shiftTable
+				shiftTable = getTable(str[5])
+				if str[6] == 'L' {
+					latchTable = shiftTable
+				}
+			} else {
+				// Though stored as a table of strings for convenience, codes
+				// actually represent 1 or 2 *bytes*.
+				decodedBytes = append(decodedBytes, str...)
+				// Go back to whatever mode we had been in
+				shiftTable = latchTable
+			}
 		}
 	}
+	result.WriteString(encodeBytes(decodedBytes, encoding))
 
 	text := result.String()
-	if utf8.ValidString(text) {
-		rawBytes = []byte(text)
-	}
-
+	rawBytes := []byte(text)
 	return text, rawBytes, nil
+}
+
+// encodeBytes converts a byte buffer to a string using the given encoding.
+// If encoding is empty, the default is ISO-8859-1 (each byte maps to its
+// Unicode code point, which is then encoded as UTF-8).
+func encodeBytes(data []byte, encoding string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	if encoding == "" || encoding == "ISO8859_1" || encoding == "ISO-8859-1" {
+		// ISO-8859-1: each byte value IS the Unicode code point
+		runes := make([]rune, len(data))
+		for i, b := range data {
+			runes[i] = rune(b)
+		}
+		return string(runes)
+	}
+	return charset.DecodeBytes(data, encoding)
+}
+
+// readCodeJava reads a code of given length at given index in the bit array.
+// Matches Java ZXing Decoder.readCode exactly.
+func readCodeJava(rawbits []bool, startIndex, length int) int {
+	res := 0
+	for i := startIndex; i < startIndex+length; i++ {
+		res <<= 1
+		if rawbits[i] {
+			res |= 1
+		}
+	}
+	return res
 }
 
 // readCode reads bitsToRead bits starting at index from the corrected bit
 // stream and returns the integer value (MSB first) together with the new index.
+// Returns -1 if not enough bits remain.
 func readCode(correctedBits []bool, index, bitsToRead, endIndex int) (int, int) {
 	if index+bitsToRead > endIndex {
 		return -1, endIndex
@@ -265,202 +431,6 @@ func readCode(correctedBits []bool, index, bitsToRead, endIndex int) (int, int) 
 		}
 	}
 	return code, index + bitsToRead
-}
-
-// decodeNonDigit handles UPPER, LOWER, MIXED and PUNCT modes (all 5-bit).
-func decodeNonDigit(result *strings.Builder, bits []bool, index, endIndex, mode int) (int, int) {
-	code, newIndex := readCode(bits, index, 5, endIndex)
-	if code < 0 {
-		return endIndex, mode
-	}
-	index = newIndex
-
-	// FLG(n) is code 0 in every non-digit mode.
-	if code == 0 {
-		return handleFLG(result, bits, index, endIndex, mode)
-	}
-
-	switch mode {
-	case modeUpper:
-		switch {
-		case code >= 1 && code <= 27:
-			result.WriteRune(upperTable[code])
-		case code == 28:
-			return index, modeLower
-		case code == 29:
-			return index, modeMixed
-		case code == 30:
-			return index, modeDigit
-		case code == 31:
-			return handleBinaryShift(result, bits, index, endIndex, mode)
-		}
-
-	case modeLower:
-		switch {
-		case code >= 1 && code <= 27:
-			result.WriteRune(lowerTable[code])
-		case code == 28:
-			return decodeOneCharShift(result, bits, index, endIndex, modeLower, modeUpper)
-		case code == 29:
-			return index, modeMixed
-		case code == 30:
-			return index, modeDigit
-		case code == 31:
-			return handleBinaryShift(result, bits, index, endIndex, mode)
-		}
-
-	case modeMixed:
-		switch {
-		case code >= 1 && code <= 27:
-			result.WriteRune(mixedTable[code])
-		case code == 28:
-			return index, modePunct
-		case code == 29:
-			return index, modeUpper
-		case code == 30:
-			return decodeOneCharShift(result, bits, index, endIndex, modeMixed, modePunct)
-		case code == 31:
-			return handleBinaryShift(result, bits, index, endIndex, mode)
-		}
-
-	case modePunct:
-		switch {
-		case code >= 1 && code <= 30:
-			result.WriteString(punctTable[code])
-		case code == 31:
-			return index, modeUpper
-		}
-	}
-
-	return index, mode
-}
-
-// decodeDigit handles DIGIT mode (4-bit codewords).
-func decodeDigit(result *strings.Builder, bits []bool, index, endIndex int) (int, int) {
-	code, newIndex := readCode(bits, index, 4, endIndex)
-	if code < 0 {
-		return endIndex, modeDigit
-	}
-	index = newIndex
-
-	switch {
-	case code == 0:
-		return handleFLG(result, bits, index, endIndex, modeDigit)
-	case code == 1:
-		return decodeOneCharShift(result, bits, index, endIndex, modeDigit, modePunct)
-	case code >= 2 && code <= 11:
-		result.WriteByte(byte('0' + code - 2))
-	case code == 12:
-		result.WriteByte(',')
-	case code == 13:
-		result.WriteByte('.')
-	case code == 14:
-		return index, modeUpper
-	case code == 15:
-		return decodeOneCharShift(result, bits, index, endIndex, modeDigit, modeUpper)
-	}
-
-	return index, modeDigit
-}
-
-// decodeOneCharShift reads exactly one character in the target mode and
-// returns to the originating mode.
-func decodeOneCharShift(result *strings.Builder, bits []bool, index, endIndex, returnMode, shiftMode int) (int, int) {
-	if shiftMode == modeDigit {
-		code, newIndex := readCode(bits, index, 4, endIndex)
-		if code < 0 {
-			return endIndex, returnMode
-		}
-		index = newIndex
-		switch {
-		case code >= 2 && code <= 11:
-			result.WriteByte(byte('0' + code - 2))
-		case code == 12:
-			result.WriteByte(',')
-		case code == 13:
-			result.WriteByte('.')
-		}
-		return index, returnMode
-	}
-
-	code, newIndex := readCode(bits, index, 5, endIndex)
-	if code < 0 {
-		return endIndex, returnMode
-	}
-	index = newIndex
-
-	switch shiftMode {
-	case modeUpper:
-		if code >= 1 && code <= 27 {
-			result.WriteRune(upperTable[code])
-		}
-	case modeLower:
-		if code >= 1 && code <= 27 {
-			result.WriteRune(lowerTable[code])
-		}
-	case modeMixed:
-		if code >= 1 && code <= 27 {
-			result.WriteRune(mixedTable[code])
-		}
-	case modePunct:
-		if code >= 1 && code <= 30 {
-			result.WriteString(punctTable[code])
-		}
-	}
-
-	return index, returnMode
-}
-
-// handleFLG processes the FLG(n) function.
-func handleFLG(result *strings.Builder, bits []bool, index, endIndex, mode int) (int, int) {
-	n, newIndex := readCode(bits, index, 3, endIndex)
-	if n < 0 {
-		return endIndex, mode
-	}
-	index = newIndex
-
-	switch {
-	case n == 0:
-		result.WriteByte(0x1D) // FNC1 -> GS
-	case n >= 1 && n <= 4:
-		// ECI: read n 4-bit digit codes
-		for i := 0; i < n; i++ {
-			_, index = readCode(bits, index, 4, endIndex)
-		}
-	case n == 7:
-		// Reserved, technically invalid
-	}
-
-	return index, mode
-}
-
-// handleBinaryShift reads a binary-shift length and then that many raw bytes.
-func handleBinaryShift(result *strings.Builder, bits []bool, index, endIndex, mode int) (int, int) {
-	length, newIndex := readCode(bits, index, 5, endIndex)
-	if length < 0 {
-		return endIndex, mode
-	}
-	index = newIndex
-
-	if length == 0 {
-		extra, newIndex2 := readCode(bits, index, 11, endIndex)
-		if extra < 0 {
-			return endIndex, mode
-		}
-		index = newIndex2
-		length = extra + 31
-	}
-
-	for i := 0; i < length; i++ {
-		ch, newIdx := readCode(bits, index, 8, endIndex)
-		if ch < 0 {
-			return endIndex, mode
-		}
-		index = newIdx
-		result.WriteByte(byte(ch))
-	}
-
-	return index, mode
 }
 
 // ---------------------------------------------------------------------------
