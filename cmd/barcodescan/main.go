@@ -13,6 +13,8 @@ import (
 	"github.com/ericlevine/zxinggo/binarizer"
 
 	// Register all format readers.
+	_ "github.com/ericlevine/zxinggo/aztec"
+	_ "github.com/ericlevine/zxinggo/datamatrix"
 	_ "github.com/ericlevine/zxinggo/oned"
 	_ "github.com/ericlevine/zxinggo/pdf417"
 	_ "github.com/ericlevine/zxinggo/qrcode"
@@ -69,6 +71,8 @@ var allFormats = []zxinggo.Format{
 	zxinggo.FormatUPCE,
 	zxinggo.FormatITF,
 	zxinggo.FormatCodabar,
+	zxinggo.FormatDataMatrix,
+	zxinggo.FormatAztec,
 }
 
 func scanFile(path string, tryHarder, pure bool) ([]*zxinggo.Result, error) {

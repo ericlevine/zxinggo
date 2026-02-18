@@ -22,6 +22,8 @@ const (
 	FormatUPCE
 	FormatITF
 	FormatCodabar
+	FormatDataMatrix
+	FormatAztec
 )
 
 // String returns the name of the barcode format.
@@ -47,6 +49,10 @@ func (f Format) String() string {
 		return "ITF"
 	case FormatCodabar:
 		return "CODABAR"
+	case FormatDataMatrix:
+		return "DATA_MATRIX"
+	case FormatAztec:
+		return "AZTEC"
 	default:
 		return "UNKNOWN"
 	}
