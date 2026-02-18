@@ -16,8 +16,8 @@ import (
 	"github.com/ericlevine/zxinggo/binarizer"
 )
 
-// blackboxTestDir is the path to the Java ZXing blackbox test resources.
-const blackboxTestDir = "../zxing/core/src/test/resources/blackbox"
+// blackboxTestDir is the path to the blackbox test resources (copied from Java ZXing).
+const blackboxTestDir = "testdata/blackbox"
 
 // blackboxTestRotation defines expected pass/fail thresholds for one rotation angle.
 type blackboxTestRotation struct {
@@ -290,22 +290,34 @@ func runBlackBoxTest(t *testing.T, tc blackboxTestCase) {
 			source := zxinggo.NewImageLuminanceSource(rotated)
 			bitmap := zxinggo.NewBinaryBitmap(binarizer.NewHybrid(source))
 			result := tryDecode(bitmap, tc.format, false)
-			switch classifyResult(result, tc.format, td.expectedText, td.metadata) {
+			outcome := classifyResult(result, tc.format, td.expectedText, td.metadata)
+			switch outcome {
 			case resultPassed:
 				passedCounts[i]++
 			case resultMisread:
 				misreadCounts[i]++
+				t.Logf("  MISREAD rot=%.0f file=%s got=%q expected=%q format=%v meta=%v",
+					rot.rotation, filepath.Base(td.path),
+					resultText(result), td.expectedText, result.Format, result.Metadata)
+			case resultNotFound:
+				t.Logf("  NOTFOUND rot=%.0f file=%s", rot.rotation, filepath.Base(td.path))
 			}
 
 			// TryHarder decode
 			source2 := zxinggo.NewImageLuminanceSource(rotated)
 			bitmap2 := zxinggo.NewBinaryBitmap(binarizer.NewHybrid(source2))
 			result2 := tryDecode(bitmap2, tc.format, true)
-			switch classifyResult(result2, tc.format, td.expectedText, td.metadata) {
+			outcome2 := classifyResult(result2, tc.format, td.expectedText, td.metadata)
+			switch outcome2 {
 			case resultPassed:
 				tryHarderCounts[i]++
 			case resultMisread:
 				tryHarderMisreadCounts[i]++
+				t.Logf("  MISREAD(TH) rot=%.0f file=%s got=%q expected=%q format=%v meta=%v",
+					rot.rotation, filepath.Base(td.path),
+					resultText(result2), td.expectedText, result2.Format, result2.Metadata)
+			case resultNotFound:
+				t.Logf("  NOTFOUND(TH) rot=%.0f file=%s", rot.rotation, filepath.Base(td.path))
 			}
 		}
 	}
@@ -362,6 +374,13 @@ const (
 	resultPassed
 	resultMisread
 )
+
+func resultText(r *zxinggo.Result) string {
+	if r == nil {
+		return "<nil>"
+	}
+	return r.Text
+}
 
 // classifyResult classifies a decode result as passed, misread, or not found.
 func classifyResult(result *zxinggo.Result, format zxinggo.Format, expectedText string, expectedMeta map[string]string) decodeOutcome {
